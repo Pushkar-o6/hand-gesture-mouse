@@ -1,3 +1,8 @@
+import os
+import warnings
+os.environ['GLOG_minloglevel']        = '3'   # Suppress MediaPipe C++ INFO/WARNING logs
+os.environ['TF_CPP_MIN_LOG_LEVEL']   = '3'   # Suppress TensorFlow logs
+warnings.filterwarnings('ignore', category=UserWarning)  # Suppress protobuf deprecation
 import cv2
 import mediapipe as mp
 import pyautogui
@@ -391,16 +396,17 @@ def webcam_thread():
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAM_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
-    cap.set(cv2.CAP_PROP_FPS,          30)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)    # Minimize buffer lag
+    cap.set(cv2.CAP_PROP_FPS,          60)              # Request 60fps for smoother capture
+    cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)              # Minimize buffer lag
+    cap.set(cv2.CAP_PROP_AUTOFOCUS,    1)              # Enable autofocus
 
     mp_hands = mp.solutions.hands
     hands    = mp_hands.Hands(
         static_image_mode        = False,
         max_num_hands            = 1,
-        model_complexity         = 1,          # Accurate model — better landmark placement
-        min_detection_confidence = 0.75,
-        min_tracking_confidence  = 0.75,
+        model_complexity         = 0,          # Lite model — 2x faster
+        min_detection_confidence = 0.60,       # More lenient — no detection gaps
+        min_tracking_confidence  = 0.60,       # More responsive
     )
     draw_utils = mp.solutions.drawing_utils
     lm_style   = draw_utils.DrawingSpec(color=(0, 255, 180), thickness=1, circle_radius=2)
@@ -490,7 +496,7 @@ def webcam_thread():
         label = 'MODE 1: MOUSE' if mode == 1 else 'MODE 2: SCREEN EDITOR'
         color = (255, 140, 0) if mode == 1 else (0, 210, 100)
         cv2.rectangle(frame, (0, 0), (CAM_W, 36), (25, 25, 25), -1)
-        cv2.putText(frame, label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+        cv2.putText(frame, label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
 
         now = time.time()
 
@@ -508,6 +514,7 @@ def webcam_thread():
                     lm_smooth[i][1] = lm_smooth[i][1] * LM_ALPHA + lk.y * (1 - LM_ALPHA)
 
             # ── Draw skeleton using SMOOTHED coords ───────────────
+            # Draw every frame for smooth hand skeleton visualization
             for conn in mp_hands.HAND_CONNECTIONS:
                 a, b = conn
                 ax = int(lm_smooth[a][0] * CAM_W)
@@ -868,8 +875,8 @@ def webcam_thread():
         fps_buf.append(1 / max(now - prev_time, 0.001))
         prev_time = now
         fps = int(sum(fps_buf)/len(fps_buf))
-        cv2.putText(frame, f'FPS:{fps}', (CAM_W-80, 26),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160,160,160), 1)
+        cv2.putText(frame, f'FPS:{fps}', (CAM_W-70, 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160,160,160), 1)
 
         # ── Dynamic threshold HUD ─────────────────────────────────
         if result.multi_hand_landmarks:
@@ -880,13 +887,13 @@ def webcam_thread():
                 (0, 80, 255)
             )
             dist_label = 'CLOSE' if dist_pct > 0.65 else ('MEDIUM' if dist_pct > 0.35 else 'FAR')
-            bar_w = int(dist_pct * 90)
+            bar_w = int(dist_pct * 80)
             # Background bar
-            cv2.rectangle(frame, (CAM_W-102, 42), (CAM_W-10, 54), (40,40,40), -1)
+            cv2.rectangle(frame, (CAM_W-92, 42), (CAM_W-10, 52), (40,40,40), -1)
             # Filled bar
-            cv2.rectangle(frame, (CAM_W-102, 42), (CAM_W-102+bar_w, 54), bar_color, -1)
-            cv2.putText(frame, f'DIST:{dist_label} thr:{pinch_thr:.3f}',
-                        (CAM_W-130, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.32, bar_color, 1)
+            cv2.rectangle(frame, (CAM_W-92, 42), (CAM_W-92+bar_w, 52), bar_color, -1)
+            cv2.putText(frame, f'DIST:{dist_label} {pinch_thr:.2f}',
+                        (CAM_W-120, 66), cv2.FONT_HERSHEY_SIMPLEX, 0.3, bar_color, 1)
 
         # ── Hints ─────────────────────────────────────────────────
         with mode_lock:
@@ -899,8 +906,8 @@ def webcam_thread():
              'rng+th=color', 'pky+th(hold)=clear', 'S=save']
         )
         for i, h in enumerate(hints):
-            cv2.putText(frame, h, (CAM_W-160, CAM_H-110+i*18),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (120,120,120), 1)
+            cv2.putText(frame, h, (CAM_W-145, CAM_H-110+i*15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100,100,100), 1)
 
         cv2.imshow(window_name, frame)
 
