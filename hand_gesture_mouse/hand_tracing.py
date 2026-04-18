@@ -72,9 +72,9 @@ DEADZONE              = 2.5         # Pixels — ignore sub-pixel noise
 #   RELEASE_RATIO     = 0.09 / 0.40 = 0.225  (fingers apart — tighter than before)
 #   SCROLL_RATIO      = 0.07 / 0.40 = 0.175  (index-middle close)
 #   ZOOM_RATIO        = 0.17 / 0.40 = 0.425  (index-middle visibly spread)
-PINCH_RATIO           = 0.175
-DRAW_PINCH_RATIO      = 0.325
-RELEASE_RATIO         = 0.325
+PINCH_RATIO           = 0.225
+DRAW_PINCH_RATIO      = 0.250
+RELEASE_RATIO         = 0.350
 SCROLL_RATIO          = 0.175
 ZOOM_RATIO            = 0.425
 
@@ -108,7 +108,7 @@ MODE_SWITCH_FRAMES    = 35
 
 # --- Screen editor ---
 BRUSH_MIN             = 3
-BRUSH_MAX             = 23
+BRUSH_MAX             = 18
 DRAW_SMOOTHING        = 0.72        # High value = smooth path, less jitter
 ERASER_SIZE           = 40
 CLEAR_HOLD_SEC        = 1.5         # Hold pinky+thumb this long to clear
@@ -784,7 +784,7 @@ def webcam_thread():
                         color_change_done = False
 
                         # ── Priority 3: Erase (middle+thumb pinch) ─
-                        if d_erase < pinch_thr:
+                        if d_erase < draw_pinch_thr:
                             esx, esy = norm_to_screen(
                                 (mx_n + tx_n) / 2,
                                 (my_n + ty_n) / 2
@@ -804,9 +804,9 @@ def webcam_thread():
                             spread_pct  = min(1.0, d_draw / draw_pinch_thr)
                             brush_size  = int(BRUSH_MIN + spread_pct * (BRUSH_MAX - BRUSH_MIN))
 
-                            # Track midpoint of index tip + thumb tip for stable point
-                            track_x = (ix_n + tx_n) / 2
-                            track_y = (iy_n + ty_n) / 2
+                            # Track index fingertip only — drawing starts from index pointer
+                            track_x = ix_n
+                            track_y = iy_n
 
                             if smooth_draw_sx is None:
                                 smooth_draw_sx = float(track_x)
