@@ -67,7 +67,8 @@ DEADZONE              = 2.5         # Pixels — ignore sub-pixel noise
 # Index-middle scroll close ≈ 0.04-0.07            → threshold 0.07
 # Index-middle zoom spread  ≈ 0.18-0.30            → threshold 0.17
 PINCH_THR             = 0.07
-RELEASE_THR           = 0.11
+DRAW_PINCH_THR = 0.09
+RELEASE_THR           = 0.09
 SCROLL_THR            = 0.07
 
 # --- Scroll ---
@@ -95,7 +96,7 @@ MODE_SWITCH_FRAMES    = 35
 
 # --- Screen editor ---
 BRUSH_MIN             = 3
-BRUSH_MAX             = 18
+BRUSH_MAX             = 26
 DRAW_SMOOTHING        = 0.72        # High value = smooth path, less jitter
 ERASER_SIZE           = 40
 CLEAR_HOLD_SEC        = 1.5         # Hold pinky+thumb this long to clear
@@ -385,13 +386,19 @@ def webcam_thread():
     hands    = mp_hands.Hands(
         static_image_mode        = False,
         max_num_hands            = 1,
-        model_complexity         = 0,          # FAST model
-        min_detection_confidence = 0.65,
-        min_tracking_confidence  = 0.65,
+        model_complexity         = 1,          # Accurate model — better landmark placement
+        min_detection_confidence = 0.75,
+        min_tracking_confidence  = 0.75,
     )
     draw_utils = mp.solutions.drawing_utils
     lm_style   = draw_utils.DrawingSpec(color=(0, 255, 180), thickness=1, circle_radius=2)
     cn_style   = draw_utils.DrawingSpec(color=(80, 80, 220), thickness=1)
+
+    # ── Per-landmark EMA smoothing ───────────────────────────────
+    # 21 landmarks × [x, y] — smoothed values used for BOTH drawing
+    # and all gesture distance calculations
+    LM_ALPHA  = 0.50          # blend: 0=fully raw (jittery), 1=fully frozen
+    lm_smooth = None           # initialised on first detection
 
     # ── Absolute cursor state ────────────────────────────────────
     # Rolling buffer for median-filter jitter removal
@@ -469,26 +476,40 @@ def webcam_thread():
 
         if result.multi_hand_landmarks:
             hand = result.multi_hand_landmarks[0]
+            raw_lm = hand.landmark   # 21 raw MediaPipe landmarks
 
-            # Draw landmarks scaled back to display size
-            # Scale landmark draw to display frame
-            scale_x = CAM_W  / PROC_W
-            scale_y = CAM_H  / PROC_H
+            # ── Build / update smoothed landmark array ────────────
+            if lm_smooth is None:
+                # First detection — initialise directly from raw values
+                lm_smooth = [[lk.x, lk.y] for lk in raw_lm]
+            else:
+                for i, lk in enumerate(raw_lm):
+                    lm_smooth[i][0] = lm_smooth[i][0] * LM_ALPHA + lk.x * (1 - LM_ALPHA)
+                    lm_smooth[i][1] = lm_smooth[i][1] * LM_ALPHA + lk.y * (1 - LM_ALPHA)
+
+            # ── Draw skeleton using SMOOTHED coords ───────────────
             for conn in mp_hands.HAND_CONNECTIONS:
                 a, b = conn
-                ax = int(hand.landmark[a].x * CAM_W)
-                ay = int(hand.landmark[a].y * CAM_H)
-                bx = int(hand.landmark[b].x * CAM_W)
-                by = int(hand.landmark[b].y * CAM_H)
+                ax = int(lm_smooth[a][0] * CAM_W)
+                ay = int(lm_smooth[a][1] * CAM_H)
+                bx = int(lm_smooth[b][0] * CAM_W)
+                by = int(lm_smooth[b][1] * CAM_H)
                 cv2.line(frame, (ax, ay), (bx, by), (80, 80, 220), 1)
-            for lmk in hand.landmark:
-                px = int(lmk.x * CAM_W)
-                py = int(lmk.y * CAM_H)
-                cv2.circle(frame, (px, py), 2, (0, 255, 180), -1)
+            for i, (sx_lm, sy_lm) in enumerate(lm_smooth):
+                px = int(sx_lm * CAM_W)
+                py = int(sy_lm * CAM_H)
+                r  = 4 if i in (4, 8, 12, 16, 20) else 2   # bigger dots on fingertips
+                cv2.circle(frame, (px, py), r, (0, 255, 180), -1)
 
-            lm   = hand.landmark
+            # ── Build a lightweight proxy so dist_norm / is_finger_up
+            #    can read from lm_smooth instead of raw_lm ──────────
+            class _LM:
+                __slots__ = ('x', 'y')
+                def __init__(self, x, y): self.x = x; self.y = y
 
-            # ── Key landmarks (normalised) ────────────────────────
+            lm = [_LM(x, y) for x, y in lm_smooth]  # smoothed, used everywhere below
+
+            # ── Key landmark coords (from SMOOTHED lm) ────────────
             ix_n, iy_n = lm[8].x,  lm[8].y    # index tip
             mx_n, my_n = lm[12].x, lm[12].y   # middle tip
             rx_n, ry_n = lm[16].x, lm[16].y   # ring tip
@@ -746,7 +767,7 @@ def webcam_thread():
                             smooth_draw_sx = smooth_draw_sy = None
 
                         # ── Priority 4: Draw (index+thumb pinch) ───
-                        elif d_draw < PINCH_THR:
+                        elif d_draw < DRAW_PINCH_THR:
                             # Brush size = spread ratio — closer = thinner, near release = thicker
                             spread_pct  = min(1.0, d_draw / RELEASE_THR)
                             brush_size  = int(BRUSH_MIN + spread_pct * (BRUSH_MAX - BRUSH_MIN))
@@ -793,6 +814,7 @@ def webcam_thread():
 
         else:
             # ── Hand lost ─────────────────────────────────────────
+            lm_smooth           = None   # Reset so next detection starts fresh
             scroll_mode_active  = False
             scroll_anchor_y     = None
             zoom_anchor_dist    = None
