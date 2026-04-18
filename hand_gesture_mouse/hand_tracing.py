@@ -61,15 +61,29 @@ CAM_MARGIN_X          = 0.10        # 10% margin on each side
 CAM_MARGIN_Y          = 0.10
 DEADZONE              = 2.5         # Pixels — ignore sub-pixel noise
 
-# --- Gesture thresholds (direct normalised 0-1 distances, NO hsc scaling) ---
-# Real pinch (tips touching) ≈ 0.04-0.07 normalised → threshold 0.07
-# Real release              ≈ 0.10-0.13            → threshold 0.11
-# Index-middle scroll close ≈ 0.04-0.07            → threshold 0.07
-# Index-middle zoom spread  ≈ 0.18-0.30            → threshold 0.17
-PINCH_THR             = 0.07
-DRAW_PINCH_THR = 0.09
-RELEASE_THR           = 0.09
-SCROLL_THR            = 0.07
+# --- Gesture thresholds (ratios of hand size — auto-scale with camera distance) ---
+# All distances are expressed as a fraction of the wrist→middle-knuckle length (hsc).
+# This means the same physical finger movement always triggers the same gesture
+# regardless of how far your hand is from the camera.
+#
+# Calibration basis: at normal arm distance hsc ≈ 0.40, so:
+#   PINCH_RATIO       = 0.07 / 0.40 = 0.175  (fingertips touching — all gestures)
+#   DRAW_PINCH_RATIO  = 0.09 / 0.40 = 0.225  (index+thumb draw — slightly looser)
+#   RELEASE_RATIO     = 0.09 / 0.40 = 0.225  (fingers apart — tighter than before)
+#   SCROLL_RATIO      = 0.07 / 0.40 = 0.175  (index-middle close)
+#   ZOOM_RATIO        = 0.17 / 0.40 = 0.425  (index-middle visibly spread)
+PINCH_RATIO           = 0.175
+DRAW_PINCH_RATIO      = 0.325
+RELEASE_RATIO         = 0.325
+SCROLL_RATIO          = 0.175
+ZOOM_RATIO            = 0.425
+
+# Hard clamps — prevent thresholds going crazy at extreme distances
+PINCH_THR_MIN,      PINCH_THR_MAX      = 0.02, 0.12
+DRAW_PINCH_THR_MIN, DRAW_PINCH_THR_MAX = 0.03, 0.15
+RELEASE_THR_MIN,    RELEASE_THR_MAX    = 0.03, 0.15
+SCROLL_THR_MIN,     SCROLL_THR_MAX     = 0.02, 0.12
+ZOOM_THR_MIN,       ZOOM_THR_MAX       = 0.08, 0.28
 
 # --- Scroll ---
 SCROLL_ENTRY_FRAMES   = 3
@@ -86,9 +100,7 @@ SWIPE_MAX_Y           = 0.12        # Fraction of frame height
 SWIPE_COOLDOWN        = 1.2
 
 # --- Zoom ---
-# Zoom requires index+middle clearly spread apart AND ring+pinky folded
-# 0.17 normalised ≈ fingers visibly spread, well above scroll zone (0.07)
-ZOOM_THR              = 0.17
+# Zoom requires index+middle clearly spread AND ring+pinky folded
 ZOOM_COOLDOWN         = 0.15
 
 # --- Mode switch ---
@@ -96,7 +108,7 @@ MODE_SWITCH_FRAMES    = 35
 
 # --- Screen editor ---
 BRUSH_MIN             = 3
-BRUSH_MAX             = 26
+BRUSH_MAX             = 23
 DRAW_SMOOTHING        = 0.72        # High value = smooth path, less jitter
 ERASER_SIZE           = 40
 CLEAR_HOLD_SEC        = 1.5         # Hold pinky+thumb this long to clear
@@ -400,6 +412,14 @@ def webcam_thread():
     LM_ALPHA  = 0.50          # blend: 0=fully raw (jittery), 1=fully frozen
     lm_smooth = None           # initialised on first detection
 
+    # ── Hand-size smoothing (for stable dynamic thresholds) ──────
+    hsc_smooth  = 0.40          # start at normal-distance estimate
+    pinch_thr       = PINCH_RATIO      * 0.40
+    draw_pinch_thr  = DRAW_PINCH_RATIO * 0.40
+    release_thr     = RELEASE_RATIO    * 0.40
+    scroll_thr      = SCROLL_RATIO     * 0.40
+    zoom_thr        = ZOOM_RATIO       * 0.40
+
     # ── Absolute cursor state ────────────────────────────────────
     # Rolling buffer for median-filter jitter removal
     cx_buf = deque(maxlen=CURSOR_SMOOTH_FRAMES)
@@ -510,6 +530,18 @@ def webcam_thread():
             lm = [_LM(x, y) for x, y in lm_smooth]  # smoothed, used everywhere below
 
             # ── Key landmark coords (from SMOOTHED lm) ────────────
+
+            # ── Dynamic thresholds — scale with hand distance ─────
+            # hsc = wrist→middle-knuckle distance, shrinks as hand moves away
+            raw_hsc    = hand_scale(lm)
+            hsc_smooth = hsc_smooth * 0.85 + raw_hsc * 0.15   # slow EMA — stable thresholds
+            hsc        = hsc_smooth
+
+            pinch_thr       = float(np.clip(PINCH_RATIO      * hsc, PINCH_THR_MIN,      PINCH_THR_MAX))
+            draw_pinch_thr  = float(np.clip(DRAW_PINCH_RATIO * hsc, DRAW_PINCH_THR_MIN, DRAW_PINCH_THR_MAX))
+            release_thr     = float(np.clip(RELEASE_RATIO    * hsc, RELEASE_THR_MIN,    RELEASE_THR_MAX))
+            scroll_thr      = float(np.clip(SCROLL_RATIO     * hsc, SCROLL_THR_MIN,     SCROLL_THR_MAX))
+            zoom_thr        = float(np.clip(ZOOM_RATIO       * hsc, ZOOM_THR_MIN,       ZOOM_THR_MAX))
             ix_n, iy_n = lm[8].x,  lm[8].y    # index tip
             mx_n, my_n = lm[12].x, lm[12].y   # middle tip
             rx_n, ry_n = lm[16].x, lm[16].y   # ring tip
@@ -600,7 +632,7 @@ def webcam_thread():
                                 (CAM_W//2 - 80, 66), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,220,255), 2)
 
                 # ── Right click hold (index curled to thumb) ───────
-                if d_right < PINCH_THR and not index_up and not scroll_mode_active:
+                if d_right < pinch_thr and not index_up and not scroll_mode_active:
                     if right_click_start is None:
                         right_click_start = now
                     elif not right_click_done and now - right_click_start > RIGHT_CLICK_HOLD_SEC:
@@ -619,7 +651,7 @@ def webcam_thread():
                 ring_dn  = not is_finger_up(lm, 16, 14)
                 pinky_dn = not is_finger_up(lm, 20, 18)
                 zoom_norm = dist_norm(lm, 8, 12)
-                if index_up and middle_up and ring_dn and pinky_dn and zoom_norm > ZOOM_THR:
+                if index_up and middle_up and ring_dn and pinky_dn and zoom_norm > zoom_thr:
                     if zoom_anchor_dist is None:
                         zoom_anchor_dist = zoom_norm
                     else:
@@ -636,7 +668,7 @@ def webcam_thread():
                     zoom_anchor_dist = None
 
                 # ── Scroll vs Move ────────────────────────────────
-                if d_scroll < SCROLL_THR:
+                if d_scroll < scroll_thr:
                     fingers_together_cnt += 1
                     if fingers_together_cnt >= SCROLL_ENTRY_FRAMES:
                         scroll_mode_active = True
@@ -676,7 +708,7 @@ def webcam_thread():
 
                 # ── Left click (middle + thumb) ───────────────────
                 if gesture_state == 'IDLE':
-                    if d_click < PINCH_THR:
+                    if d_click < pinch_thr:
                         gesture_state = 'PINCH'
                 elif gesture_state == 'PINCH':
                     pyautogui.click()
@@ -684,11 +716,11 @@ def webcam_thread():
                     mx_px = int(mx_n*CAM_W); my_px = int(my_n*CAM_H)
                     cv2.circle(frame, (mx_px,my_px), 14, (0,255,0), 3)
                 elif gesture_state == 'CLICKED':
-                    if d_click > RELEASE_THR:
+                    if d_click > release_thr:
                         gesture_state = 'IDLE'
 
                 # ── Drag (ring + thumb) ───────────────────────────
-                if d_drag < PINCH_THR:
+                if d_drag < pinch_thr:
                     if not dragging:
                         pyautogui.mouseDown()
                         dragging = True
@@ -714,7 +746,7 @@ def webcam_thread():
                 sx, sy = norm_to_screen(ix_n, iy_n)
 
                 # ── Priority 1: Clear canvas (pinky+thumb hold) ───
-                if d_clear < PINCH_THR:
+                if d_clear < pinch_thr:
                     if clear_hold_start is None:
                         clear_hold_start = now
                     pct = min(1.0, (now - clear_hold_start) / CLEAR_HOLD_SEC)
@@ -736,7 +768,7 @@ def webcam_thread():
                     clear_done       = False
 
                     # ── Priority 2: Color cycle (ring+thumb pinch) ─
-                    if d_color < PINCH_THR:
+                    if d_color < pinch_thr:
                         if not color_change_done:
                             draw_color_idx    = (draw_color_idx + 1) % len(EDITOR_COLORS_HEX)
                             color_change_done = True
@@ -752,7 +784,7 @@ def webcam_thread():
                         color_change_done = False
 
                         # ── Priority 3: Erase (middle+thumb pinch) ─
-                        if d_erase < PINCH_THR:
+                        if d_erase < pinch_thr:
                             esx, esy = norm_to_screen(
                                 (mx_n + tx_n) / 2,
                                 (my_n + ty_n) / 2
@@ -767,9 +799,9 @@ def webcam_thread():
                             smooth_draw_sx = smooth_draw_sy = None
 
                         # ── Priority 4: Draw (index+thumb pinch) ───
-                        elif d_draw < DRAW_PINCH_THR:
-                            # Brush size = spread ratio — closer = thinner, near release = thicker
-                            spread_pct  = min(1.0, d_draw / RELEASE_THR)
+                        elif d_draw < draw_pinch_thr:
+                            # Brush size = spread ratio — closer = thinner, near draw_pinch_thr = thicker
+                            spread_pct  = min(1.0, d_draw / draw_pinch_thr)
                             brush_size  = int(BRUSH_MIN + spread_pct * (BRUSH_MAX - BRUSH_MIN))
 
                             # Track midpoint of index tip + thumb tip for stable point
@@ -838,6 +870,23 @@ def webcam_thread():
         fps = int(sum(fps_buf)/len(fps_buf))
         cv2.putText(frame, f'FPS:{fps}', (CAM_W-80, 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160,160,160), 1)
+
+        # ── Dynamic threshold HUD ─────────────────────────────────
+        if result.multi_hand_landmarks:
+            dist_pct  = min(1.0, hsc_smooth / 0.55)
+            bar_color = (
+                (0, 220, 80)  if dist_pct > 0.65 else
+                (0, 200, 255) if dist_pct > 0.35 else
+                (0, 80, 255)
+            )
+            dist_label = 'CLOSE' if dist_pct > 0.65 else ('MEDIUM' if dist_pct > 0.35 else 'FAR')
+            bar_w = int(dist_pct * 90)
+            # Background bar
+            cv2.rectangle(frame, (CAM_W-102, 42), (CAM_W-10, 54), (40,40,40), -1)
+            # Filled bar
+            cv2.rectangle(frame, (CAM_W-102, 42), (CAM_W-102+bar_w, 54), bar_color, -1)
+            cv2.putText(frame, f'DIST:{dist_label} thr:{pinch_thr:.3f}',
+                        (CAM_W-130, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.32, bar_color, 1)
 
         # ── Hints ─────────────────────────────────────────────────
         with mode_lock:
