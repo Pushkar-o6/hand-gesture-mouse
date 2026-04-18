@@ -29,8 +29,8 @@ from collections import deque
 # ║  MODE 1 — MOUSE CONTROL                                         ║
 # ║    Index tip            → Move cursor (absolute mapped)         ║
 # ║    Index + Middle close → Scroll (anchor-based)                 ║
-# ║    Thumb + Middle       → Left click                            ║
-# ║    Thumb + Ring         → Drag                                  ║
+# ║    Thumb + Middle tap   → Left click                            ║
+# ║    Thumb + Middle hold  → Drag                                  ║
 # ║    Thumb + Index hold   → Right click                           ║
 # ║    Index + Middle wide  → Zoom (Ctrl +/-)                       ║
 # ║    Open palm swipe      → Switch browser tabs                   ║
@@ -117,6 +117,7 @@ BRUSH_MAX             = 18
 DRAW_SMOOTHING        = 0.72        # High value = smooth path, less jitter
 ERASER_SIZE           = 40
 CLEAR_HOLD_SEC        = 1.5         # Hold pinky+thumb this long to clear
+CLICK_DRAG_HOLD_SEC   = 0.22        # Thumb+middle hold duration before drag starts
 
 EDITOR_COLORS_RGB = [
     (255,  60,  60),  # Red
@@ -472,6 +473,7 @@ def webcam_thread():
     right_click_start     = None
     right_click_done      = False
     dragging              = False
+    click_drag_start      = None
 
     scroll_anchor_y       = None
     fingers_together_cnt  = 0
@@ -759,30 +761,45 @@ def webcam_thread():
                         cv2.circle(frame, (ix_px,iy_px), 8, (255,140,0), 2)
                         cv2.putText(frame, 'MOVING', (10,160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,140,0), 2)
 
-                # ── Left click (middle + thumb) ───────────────────
-                if gesture_state == 'IDLE':
-                    if d_click < pinch_thr:
-                        gesture_state = 'PINCH'
-                elif gesture_state == 'PINCH':
-                    pyautogui.click()
-                    gesture_state = 'CLICKED'
-                    mx_px = int(mx_n*CAM_W); my_px = int(my_n*CAM_H)
-                    cv2.circle(frame, (mx_px,my_px), 14, (0,255,0), 3)
-                elif gesture_state == 'CLICKED':
-                    if d_click > release_thr:
-                        gesture_state = 'IDLE'
+                # ── Combined click/drag (middle + thumb tap/hold) ──
+                # Keep click strict (pinch_thr), but keep active drag using a looser
+                # threshold (release_thr) so movement does not accidentally unpinch.
+                click_drag_active = (d_click < (release_thr if dragging else pinch_thr)) and not scroll_mode_active
+                if click_drag_active:
+                    if click_drag_start is None:
+                        click_drag_start = now
 
-                # ── Drag (ring + thumb) ───────────────────────────
-                if d_drag < pinch_thr:
-                    if not dragging:
-                        pyautogui.mouseDown()
-                        dragging = True
-                    rx_px = int(rx_n*CAM_W); ry_px = int(ry_n*CAM_H)
-                    cv2.circle(frame, (rx_px,ry_px), 14, (0,0,255), 3)
+                    hold_t = now - click_drag_start
+                    if hold_t >= CLICK_DRAG_HOLD_SEC:
+                        if not dragging:
+                            pyautogui.mouseDown()
+                            dragging = True
+                        mx_px = int(mx_n*CAM_W); my_px = int(my_n*CAM_H)
+                        cv2.circle(frame, (mx_px,my_px), 14, (0,0,255), 3)
+                        cv2.putText(frame, 'DRAG (HOLD)', (10,160),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+                    else:
+                        pct = min(1.0, hold_t / CLICK_DRAG_HOLD_SEC)
+                        mx_px = int(mx_n*CAM_W); my_px = int(my_n*CAM_H)
+                        cv2.ellipse(frame, (mx_px, my_px), (16,16), -90, 0,
+                                    int(360*pct), (0,255,120), 2)
+                        cv2.putText(frame, 'CLICK READY', (10,160),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,120), 2)
                 else:
+                    if click_drag_start is not None:
+                        hold_t = now - click_drag_start
+                        if hold_t < CLICK_DRAG_HOLD_SEC and not dragging:
+                            pyautogui.click()
+                            gesture_state = 'CLICKED'
+                        click_drag_start = None
+
                     if dragging:
                         pyautogui.mouseUp()
                         dragging = False
+
+                    if gesture_state == 'CLICKED':
+                        if d_click > release_thr:
+                            gesture_state = 'IDLE'
 
                 cv2.putText(frame, f'Click:{gesture_state}  Drag:{dragging}',
                             (10,185), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160,160,160), 1)
@@ -905,6 +922,7 @@ def webcam_thread():
             zoom_anchor_dist    = None
             right_click_start   = None
             right_click_done    = False
+            click_drag_start    = None
             clear_hold_start    = None
             prev_draw_sx = prev_draw_sy   = None
             smooth_draw_sx = smooth_draw_sy = None
@@ -945,8 +963,8 @@ def webcam_thread():
         with mode_lock:
             m = current_mode
         hints = (
-            ['idx=move', 'idx+mid=scroll', 'mid+th=click',
-             'rng+th=drag', 'idx+th=R-click', 'spread=zoom', 'palm=tab']
+            ['idx=move', 'idx+mid=scroll', 'mid+th=tap/hold',
+             'tap=click hold=drag', 'idx+th=R-click', 'spread=zoom', 'palm=tab']
             if m == 1 else
             ['relax=pen up', 'idx+th=draw', 'mid+th=erase',
              'rng+th=color', 'pky+th(hold)=clear', 'S=save']
