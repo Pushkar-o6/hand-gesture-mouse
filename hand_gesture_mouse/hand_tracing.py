@@ -141,6 +141,7 @@ pyautogui.PAUSE    = 0
 # ================================================================
 
 draw_queue   = queue.Queue(maxsize=120)   # bounded — drops stale frames if behind
+ctrl_queue   = queue.Queue(maxsize=32)    # reliable control channel (quit/save/clear/mode)
 current_mode = 1
 mode_lock    = threading.Lock()
 
@@ -184,6 +185,11 @@ class ScreenOverlay:
 
     # ── Queue polling ────────────────────────────────────────────
     def _poll(self):
+        try:
+            while True:
+                self._handle(ctrl_queue.get_nowait())
+        except queue.Empty:
+            pass
         try:
             while True:
                 self._handle(draw_queue.get_nowait())
@@ -386,6 +392,26 @@ def try_put(q, msg):
     except queue.Full:
         pass
 
+def try_put_ctrl(msg):
+    """Control messages should be reliable; if full, drop oldest and enqueue newest."""
+    try:
+        ctrl_queue.put_nowait(msg)
+    except queue.Full:
+        try:
+            ctrl_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            ctrl_queue.put_nowait(msg)
+        except queue.Full:
+            pass
+
+class LMPoint:
+    __slots__ = ('x', 'y')
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
 # ================================================================
 #  SECTION 5 — WEBCAM THREAD
 # ================================================================
@@ -393,7 +419,13 @@ def try_put(q, msg):
 def webcam_thread():
     global current_mode
 
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        try_put_ctrl(('quit',))
+        return
+
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAM_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
     cap.set(cv2.CAP_PROP_FPS,          60)              # Request 60fps for smoother capture
@@ -476,11 +508,30 @@ def webcam_thread():
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, CAM_W // 2, CAM_H // 2)
     window_moved = False
+    read_failures = 0
+    max_read_failures = 20
 
     while True:
         success, frame = cap.read()
         if not success:
+            read_failures += 1
+            if read_failures >= max_read_failures:
+                cap.release()
+                cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+                if not cap.isOpened():
+                    cap = cv2.VideoCapture(0)
+                if not cap.isOpened():
+                    try_put_ctrl(('quit',))
+                    break
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAM_W)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+                cap.set(cv2.CAP_PROP_FPS,          60)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
+                cap.set(cv2.CAP_PROP_AUTOFOCUS,    1)
+                read_failures = 0
+            time.sleep(0.005)
             continue
+        read_failures = 0
 
         frame = cv2.flip(frame, 1)
 
@@ -528,13 +579,8 @@ def webcam_thread():
                 r  = 4 if i in (4, 8, 12, 16, 20) else 2   # bigger dots on fingertips
                 cv2.circle(frame, (px, py), r, (0, 255, 180), -1)
 
-            # ── Build a lightweight proxy so dist_norm / is_finger_up
-            #    can read from lm_smooth instead of raw_lm ──────────
-            class _LM:
-                __slots__ = ('x', 'y')
-                def __init__(self, x, y): self.x = x; self.y = y
-
-            lm = [_LM(x, y) for x, y in lm_smooth]  # smoothed, used everywhere below
+            # Build once-per-frame landmark view using a module-level lightweight class.
+            lm = [LMPoint(x, y) for x, y in lm_smooth]  # smoothed, used everywhere below
 
             # ── Key landmark coords (from SMOOTHED lm) ────────────
 
@@ -603,7 +649,7 @@ def webcam_thread():
                     clear_hold_start = None
                     clear_done = False
                     cx_buf.clear(); cy_buf.clear()
-                    try_put(draw_queue, ('mode', new_mode))
+                    try_put_ctrl(('mode', new_mode))
             else:
                 mode_switch_frames = 0
 
@@ -918,12 +964,12 @@ def webcam_thread():
 
         key = cv2.waitKey(1) & 0xFF
         if key == 27:
-            try_put(draw_queue, ('quit',))
+            try_put_ctrl(('quit',))
             break
         elif key == ord('s'):
-            try_put(draw_queue, ('save',))
+            try_put_ctrl(('save',))
         elif key == ord('c'):
-            try_put(draw_queue, ('clear',))
+            try_put_ctrl(('clear',))
 
     cap.release()
     cv2.destroyAllWindows()
