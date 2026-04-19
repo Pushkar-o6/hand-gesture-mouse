@@ -179,6 +179,7 @@ class ScreenOverlay:
         self.palette_ids = []
         self.strokes     = []          # all canvas item ids for drawings
         self.color_idx   = 0
+        self.live_stroke_ids = {}
 
         self._draw_palette()
         self._draw_hud('Mode 1: Mouse Control', '#FF8C00')
@@ -202,13 +203,27 @@ class ScreenOverlay:
         kind = msg[0]
 
         if kind == 'draw':
-            _, x1, y1, x2, y2, color, size = msg
+            if len(msg) == 8:
+                _, x1, y1, x2, y2, color, size, stroke_id = msg
+            else:
+                _, x1, y1, x2, y2, color, size = msg
+                stroke_id = None
             iid = self.canvas.create_line(
                 x1, y1, x2, y2,
                 fill=color, width=size,
                 capstyle=tk.ROUND, joinstyle=tk.ROUND, smooth=True,
             )
             self.strokes.append(iid)
+            if stroke_id is not None:
+                self.live_stroke_ids.setdefault(stroke_id, []).append(iid)
+
+        elif kind == 'stroke_begin':
+            _, stroke_id = msg
+            self.live_stroke_ids[stroke_id] = []
+
+        elif kind == 'stroke_finalize':
+            _, stroke_id, points, color, size = msg
+            self._finalize_stroke(stroke_id, points, color, size)
 
         elif kind == 'erase':
             _, ex, ey, sz = msg
@@ -297,7 +312,203 @@ class ScreenOverlay:
         for iid in self.strokes:
             self.canvas.delete(iid)
         self.strokes.clear()
+        self.live_stroke_ids.clear()
         self._clear_cursor()
+
+    def _finalize_stroke(self, stroke_id, points, color, size):
+        old_ids = self.live_stroke_ids.pop(stroke_id, [])
+        for iid in old_ids:
+            self.canvas.delete(iid)
+            if iid in self.strokes:
+                self.strokes.remove(iid)
+
+        if len(points) < 2:
+            return
+
+        shape_kind, geom = self._detect_shape(points)
+        if shape_kind == 'line':
+            (x1, y1), (x2, y2) = geom
+            iid = self.canvas.create_line(
+                x1, y1, x2, y2,
+                fill=color,
+                width=size,
+                capstyle=tk.ROUND,
+                joinstyle=tk.ROUND,
+                smooth=False,
+            )
+            self.strokes.append(iid)
+
+        elif shape_kind == 'rect':
+            rect_pts = geom
+            flat = [v for p in rect_pts for v in p]
+            iid = self.canvas.create_polygon(
+                *flat,
+                outline=color,
+                fill='',
+                width=size,
+                smooth=False,
+            )
+            self.strokes.append(iid)
+
+        elif shape_kind == 'circle':
+            cx, cy, r = geom
+            iid = self.canvas.create_oval(
+                cx - r, cy - r, cx + r, cy + r,
+                outline=color,
+                width=size,
+            )
+            self.strokes.append(iid)
+
+        else:
+            smooth_points = self._smooth_stroke(points)
+            if len(smooth_points) >= 2:
+                flat = [v for p in smooth_points for v in p]
+                iid = self.canvas.create_line(
+                    *flat,
+                    fill=color,
+                    width=size,
+                    capstyle=tk.ROUND,
+                    joinstyle=tk.ROUND,
+                    smooth=True,
+                    splinesteps=24,
+                )
+                self.strokes.append(iid)
+
+    def _detect_shape(self, points):
+        pts = np.array(points, dtype=np.float32)
+        if len(pts) < 3:
+            return 'raw', None
+
+        p0 = pts[0]
+        p1 = pts[-1]
+        bbox_min = pts.min(axis=0)
+        bbox_max = pts.max(axis=0)
+        w, h = bbox_max - bbox_min
+        diag = max(10.0, float(np.hypot(w, h)))
+        closed = np.linalg.norm(p1 - p0) < (0.20 * diag)
+
+        line_dist = np.linalg.norm(p1 - p0)
+        if line_dist > 10:
+            line_vec = (p1 - p0) / (line_dist + 1e-6)
+            rel = pts - p0
+            perp = np.abs(rel[:, 0] * line_vec[1] - rel[:, 1] * line_vec[0])
+            mean_perp = float(np.mean(perp))
+            if not closed and mean_perp < max(3.5, 0.03 * diag):
+                return 'line', ((float(p0[0]), float(p0[1])), (float(p1[0]), float(p1[1])))
+
+        if not closed or len(pts) < 8:
+            return 'raw', None
+
+        contour = pts.astype(np.int32).reshape(-1, 1, 2)
+        area = abs(cv2.contourArea(contour))
+        if area < 80:
+            return 'raw', None
+
+        peri = cv2.arcLength(contour, True)
+        circularity = float((4.0 * math.pi * area) / (peri * peri + 1e-6))
+        (cx, cy), radius = cv2.minEnclosingCircle(contour)
+        radius = max(1e-6, float(radius))
+        dists = np.linalg.norm(pts - np.array([cx, cy], dtype=np.float32), axis=1)
+        radial_std_ratio = float(np.std(dists) / radius)
+        aspect_ratio = float(min(w, h) / max(w, h, 1e-6))
+
+        if circularity > 0.74 and radial_std_ratio < 0.22 and aspect_ratio > 0.72:
+            return 'circle', (float(cx), float(cy), float(radius))
+
+        approx = cv2.approxPolyDP(contour, 0.03 * peri, True)
+
+        if len(approx) == 4:
+            quad = [(float(p[0][0]), float(p[0][1])) for p in approx]
+            if self._quad_is_rect(quad):
+                ordered = self._order_quad(quad)
+                rect_area = max(1.0, cv2.contourArea(np.array(ordered, dtype=np.float32)))
+                fill_ratio = area / rect_area
+                edge_support = self._rectangle_edge_support(pts, ordered)
+                if fill_ratio > 0.68 and edge_support > 0.74:
+                    return 'rect', ordered
+
+        if circularity > 0.70 and radial_std_ratio < 0.20 and aspect_ratio > 0.80:
+            (cx, cy), radius = cv2.minEnclosingCircle(contour)
+            return 'circle', (float(cx), float(cy), float(radius))
+
+        return 'raw', None
+
+    def _order_quad(self, quad):
+        arr = np.array(quad, dtype=np.float32)
+        center = arr.mean(axis=0)
+        ang = np.arctan2(arr[:, 1] - center[1], arr[:, 0] - center[0])
+        ordered = arr[np.argsort(ang)]
+        start = int(np.argmin(ordered[:, 0] + ordered[:, 1]))
+        ordered = np.roll(ordered, -start, axis=0)
+        return [(float(p[0]), float(p[1])) for p in ordered]
+
+    def _quad_is_rect(self, quad):
+        q = self._order_quad(quad)
+        v = []
+        for i in range(4):
+            x1, y1 = q[i]
+            x2, y2 = q[(i + 1) % 4]
+            v.append(np.array([x2 - x1, y2 - y1], dtype=np.float32))
+
+        for i in range(4):
+            a = v[i]
+            b = v[(i + 1) % 4]
+            na = np.linalg.norm(a)
+            nb = np.linalg.norm(b)
+            if na < 3 or nb < 3:
+                return False
+            cosang = float(np.dot(a, b) / (na * nb + 1e-6))
+            angle = math.degrees(math.acos(np.clip(abs(cosang), 0.0, 1.0)))
+            if abs(angle - 90.0) > 22.0:
+                return False
+        return True
+
+    def _point_to_seg_dist(self, p, a, b):
+        p = np.array(p, dtype=np.float32)
+        a = np.array(a, dtype=np.float32)
+        b = np.array(b, dtype=np.float32)
+        ab = b - a
+        den = float(np.dot(ab, ab))
+        if den < 1e-6:
+            return float(np.linalg.norm(p - a))
+        t = float(np.dot(p - a, ab) / den)
+        t = max(0.0, min(1.0, t))
+        proj = a + t * ab
+        return float(np.linalg.norm(p - proj))
+
+    def _rectangle_edge_support(self, pts, quad):
+        tol = max(4.0, 0.025 * float(np.hypot(pts[:, 0].max() - pts[:, 0].min(), pts[:, 1].max() - pts[:, 1].min())))
+        ok = 0
+        for p in pts:
+            d = min(
+                self._point_to_seg_dist(p, quad[0], quad[1]),
+                self._point_to_seg_dist(p, quad[1], quad[2]),
+                self._point_to_seg_dist(p, quad[2], quad[3]),
+                self._point_to_seg_dist(p, quad[3], quad[0]),
+            )
+            if d <= tol:
+                ok += 1
+        return ok / max(1, len(pts))
+
+    def _smooth_stroke(self, points):
+        if len(points) < 4:
+            return points
+
+        pts = np.array(points, dtype=np.float32)
+        for _ in range(2):
+            new_pts = [pts[0]]
+            for i in range(len(pts) - 1):
+                p = pts[i]
+                q = pts[i + 1]
+                new_pts.append(0.75 * p + 0.25 * q)
+                new_pts.append(0.25 * p + 0.75 * q)
+            new_pts.append(pts[-1])
+            pts = np.array(new_pts, dtype=np.float32)
+
+        smoothed = [(float(p[0]), float(p[1])) for p in pts[::2]]
+        if smoothed[-1] != (float(pts[-1][0]), float(pts[-1][1])):
+            smoothed.append((float(pts[-1][0]), float(pts[-1][1])))
+        return smoothed
 
     def _draw_hud(self, text, color):
         if self.hud_id:
@@ -496,6 +707,12 @@ def webcam_thread():
     prev_draw_sy          = None
     smooth_draw_sx        = None
     smooth_draw_sy        = None
+    drawing_active        = False
+    stroke_points         = []
+    stroke_color          = EDITOR_COLORS_HEX[0]
+    stroke_size_samples   = []
+    stroke_id_counter     = 0
+    active_stroke_id      = None
 
     color_change_done     = False
     clear_hold_start      = None
@@ -512,6 +729,21 @@ def webcam_thread():
     window_moved = False
     read_failures = 0
     max_read_failures = 20
+
+    def finalize_active_stroke():
+        nonlocal drawing_active, stroke_points, stroke_color, stroke_size_samples, active_stroke_id
+        nonlocal prev_draw_sx, prev_draw_sy, smooth_draw_sx, smooth_draw_sy
+
+        if drawing_active and active_stroke_id is not None and len(stroke_points) >= 2:
+            avg_size = max(BRUSH_MIN, int(np.mean(stroke_size_samples) if stroke_size_samples else BRUSH_MIN))
+            try_put(draw_queue, ('stroke_finalize', active_stroke_id, stroke_points, stroke_color, avg_size))
+
+        drawing_active = False
+        stroke_points = []
+        stroke_size_samples = []
+        active_stroke_id = None
+        prev_draw_sx = prev_draw_sy = None
+        smooth_draw_sx = smooth_draw_sy = None
 
     while True:
         success, frame = cap.read()
@@ -646,8 +878,7 @@ def webcam_thread():
                     scroll_mode_active  = False
                     scroll_anchor_y     = None
                     zoom_anchor_dist    = None
-                    prev_draw_sx = prev_draw_sy = None
-                    smooth_draw_sx = smooth_draw_sy = None
+                    finalize_active_stroke()
                     clear_hold_start = None
                     clear_done = False
                     cx_buf.clear(); cy_buf.clear()
@@ -817,6 +1048,7 @@ def webcam_thread():
 
                 # ── Priority 1: Clear canvas (pinky+thumb hold) ───
                 if d_clear < pinch_thr:
+                    finalize_active_stroke()
                     if clear_hold_start is None:
                         clear_hold_start = now
                     pct = min(1.0, (now - clear_hold_start) / CLEAR_HOLD_SEC)
@@ -839,6 +1071,7 @@ def webcam_thread():
 
                     # ── Priority 2: Color cycle (ring+thumb pinch) ─
                     if d_color < pinch_thr:
+                        finalize_active_stroke()
                         if not color_change_done:
                             draw_color_idx    = (draw_color_idx + 1) % len(EDITOR_COLORS_HEX)
                             color_change_done = True
@@ -855,6 +1088,7 @@ def webcam_thread():
 
                         # ── Priority 3: Erase (middle+thumb pinch) ─
                         if d_erase < draw_pinch_thr:
+                            finalize_active_stroke()
                             esx, esy = norm_to_screen(
                                 (mx_n + tx_n) / 2,
                                 (my_n + ty_n) / 2
@@ -865,9 +1099,6 @@ def webcam_thread():
                             cv2.circle(frame, (mx_px,my_px), 14, (180,180,180), 2)
                             cv2.putText(frame, 'ERASING', (10,160),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180,180,180), 2)
-                            prev_draw_sx = prev_draw_sy = None
-                            smooth_draw_sx = smooth_draw_sy = None
-
                         # ── Priority 4: Draw (index+thumb pinch) ───
                         elif d_draw < draw_pinch_thr:
                             # Brush size = spread ratio — closer = thinner, near draw_pinch_thr = thicker
@@ -887,10 +1118,23 @@ def webcam_thread():
 
                             dsx, dsy = norm_to_screen(smooth_draw_sx, smooth_draw_sy)
 
-                            if prev_draw_sx is not None:
+                            if not drawing_active:
+                                stroke_id_counter += 1
+                                active_stroke_id = stroke_id_counter
+                                drawing_active = True
+                                stroke_points = []
+                                stroke_size_samples = []
+                                stroke_color = cur_hex
+                                try_put(draw_queue, ('stroke_begin', active_stroke_id))
+
+                            if not stroke_points or abs(stroke_points[-1][0] - dsx) + abs(stroke_points[-1][1] - dsy) >= 2:
+                                stroke_points.append((dsx, dsy))
+                                stroke_size_samples.append(brush_size)
+
+                            if prev_draw_sx is not None and active_stroke_id is not None:
                                 try_put(draw_queue, ('draw',
                                                      prev_draw_sx, prev_draw_sy, dsx, dsy,
-                                                     cur_hex, brush_size))
+                                                     cur_hex, brush_size, active_stroke_id))
 
                             prev_draw_sx, prev_draw_sy = dsx, dsy
                             try_put(draw_queue, ('cursor', dsx, dsy, cur_hex, 'draw'))
@@ -904,8 +1148,7 @@ def webcam_thread():
 
                         # ── Priority 5: Pen up (everything else) ───
                         else:
-                            prev_draw_sx = prev_draw_sy   = None
-                            smooth_draw_sx = smooth_draw_sy = None
+                            finalize_active_stroke()
                             try_put(draw_queue, ('cursor', sx, sy, '#777777', 'penup'))
                             cv2.putText(frame, 'PEN UP', (10,160),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (130,130,130), 2)
@@ -924,8 +1167,7 @@ def webcam_thread():
             right_click_done    = False
             click_drag_start    = None
             clear_hold_start    = None
-            prev_draw_sx = prev_draw_sy   = None
-            smooth_draw_sx = smooth_draw_sy = None
+            finalize_active_stroke()
             cx_buf.clear(); cy_buf.clear()
             if dragging:
                 pyautogui.mouseUp()
