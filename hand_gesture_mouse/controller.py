@@ -56,6 +56,9 @@ from .settings import (
     SWIPE_MAX_Y,
     SWIPE_MIN_X,
     SWIPE_WINDOW_SEC,
+    WINDOW_SWITCH_HOLD_SEC,
+    WINDOW_SWITCH_STEP_COOLDOWN,
+    WINDOW_SWITCH_STEP_X,
     ZOOM_COOLDOWN,
     ZOOM_RATIO,
     ZOOM_THR_MAX,
@@ -132,6 +135,11 @@ def webcam_thread():
     last_swipe_time = 0.0
     swipe_flash_label = ""
     swipe_flash_until = 0.0
+
+    window_switch_hold_start = None
+    window_switch_active = False
+    window_switch_anchor_x = None
+    last_window_switch_step = 0.0
 
     mode_switch_frames = 0
 
@@ -308,6 +316,9 @@ def webcam_thread():
                     1,
                 )
                 if mode_switch_frames >= MODE_SWITCH_FRAMES:
+                    if window_switch_active:
+                        pyautogui.keyUp("alt")
+                        window_switch_active = False
                     new_mode = toggle_mode()
                     mode_switch_frames = 0
                     gesture_state = "IDLE"
@@ -321,6 +332,8 @@ def webcam_thread():
                     clear_done = False
                     draw_gesture_active = False
                     erase_gesture_active = False
+                    window_switch_hold_start = None
+                    window_switch_anchor_x = None
                     cx_buf.clear()
                     cy_buf.clear()
                     try_put_ctrl(("mode", new_mode))
@@ -329,6 +342,75 @@ def webcam_thread():
 
             if mode == 1:
                 try_put(draw_queue, ("cursor_hide",))
+
+                window_switch_pinched = d_color < (release_thr if window_switch_active else pinch_thr)
+
+                if window_switch_pinched:
+                    if not window_switch_active:
+                        if window_switch_hold_start is None:
+                            window_switch_hold_start = now
+
+                        hold_pct = min(1.0, (now - window_switch_hold_start) / WINDOW_SWITCH_HOLD_SEC)
+                        rx_px = int(rx_n * CAM_W)
+                        ry_px = int(ry_n * CAM_H)
+                        cv2.ellipse(
+                            frame,
+                            (rx_px, ry_px),
+                            (18, 18),
+                            -90,
+                            0,
+                            int(360 * hold_pct),
+                            (255, 120, 0),
+                            2,
+                        )
+                        cv2.putText(
+                            frame,
+                            "HOLD: WINDOW SWITCH",
+                            (10, 160),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.58,
+                            (255, 120, 0),
+                            2,
+                        )
+
+                        if hold_pct >= 1.0:
+                            pyautogui.keyDown("alt")
+                            pyautogui.press("tab")
+                            window_switch_active = True
+                            window_switch_anchor_x = (tx_n + rx_n) / 2.0
+                            last_window_switch_step = now
+                            scroll_mode_active = False
+                            scroll_anchor_y = None
+                            zoom_anchor_dist = None
+                    else:
+                        pinch_center_x = (tx_n + rx_n) / 2.0
+                        if window_switch_anchor_x is None:
+                            window_switch_anchor_x = pinch_center_x
+
+                        delta_x = pinch_center_x - window_switch_anchor_x
+                        if abs(delta_x) > WINDOW_SWITCH_STEP_X and (now - last_window_switch_step) > WINDOW_SWITCH_STEP_COOLDOWN:
+                            if delta_x > 0:
+                                pyautogui.press("tab")
+                            else:
+                                pyautogui.hotkey("shift", "tab")
+                            window_switch_anchor_x = pinch_center_x
+                            last_window_switch_step = now
+
+                        cv2.putText(
+                            frame,
+                            "WINDOW SWITCH (MOVE PINCH)",
+                            (10, 160),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.58,
+                            (255, 200, 0),
+                            2,
+                        )
+                else:
+                    window_switch_hold_start = None
+                    window_switch_anchor_x = None
+                    if window_switch_active:
+                        pyautogui.keyUp("alt")
+                        window_switch_active = False
 
                 wrist_history.append((wx_n, wy_n, now))
                 while wrist_history and now - wrist_history[0][2] > SWIPE_WINDOW_SEC:
@@ -622,6 +704,9 @@ def webcam_thread():
                 cv2.rectangle(frame, (CAM_W - 40, 44), (CAM_W - 8, 76), (255, 255, 255), 1)
 
         else:
+            if window_switch_active:
+                pyautogui.keyUp("alt")
+                window_switch_active = False
             lm_smooth = None
             scroll_mode_active = False
             scroll_anchor_y = None
@@ -630,6 +715,8 @@ def webcam_thread():
             right_click_done = False
             click_drag_start = None
             clear_hold_start = None
+            window_switch_hold_start = None
+            window_switch_anchor_x = None
             draw_gesture_active = False
             erase_gesture_active = False
             finalize_active_stroke()
@@ -688,12 +775,19 @@ def webcam_thread():
 
         key = cv2.waitKey(1) & 0xFF
         if key == 27:
+            if window_switch_active:
+                pyautogui.keyUp("alt")
+                window_switch_active = False
             try_put_ctrl(("quit",))
             break
         if key == ord("s"):
             try_put_ctrl(("save",))
         elif key == ord("c"):
             try_put_ctrl(("clear",))
+
+    if window_switch_active:
+        pyautogui.keyUp("alt")
+        window_switch_active = False
 
     cap.release()
     cv2.destroyAllWindows()
