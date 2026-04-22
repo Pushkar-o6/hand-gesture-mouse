@@ -1,0 +1,74 @@
+import os
+import warnings
+
+# Set noisy runtime logs to the minimum before MediaPipe/TensorFlow import.
+os.environ["GLOG_minloglevel"] = "3"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+warnings.filterwarnings("ignore", category=UserWarning)
+
+CAM_W, CAM_H = 640, 480
+PROC_W, PROC_H = 480, 360
+CAM_WIN_X = 20
+CAM_WIN_Y = 20
+
+# Cursor
+SMOOTHING = 0.25
+CURSOR_SMOOTH_FRAMES = 5
+CAM_MARGIN_X = 0.10
+CAM_MARGIN_Y = 0.10
+DEADZONE = 2.5
+
+# Gesture thresholds
+PINCH_RATIO = 0.225
+DRAW_PINCH_RATIO = 0.250
+RELEASE_RATIO = 0.350
+SCROLL_RATIO = 0.175
+ZOOM_RATIO = 0.425
+
+PINCH_THR_MIN, PINCH_THR_MAX = 0.02, 0.12
+DRAW_PINCH_THR_MIN, DRAW_PINCH_THR_MAX = 0.03, 0.15
+RELEASE_THR_MIN, RELEASE_THR_MAX = 0.03, 0.15
+SCROLL_THR_MIN, SCROLL_THR_MAX = 0.02, 0.12
+ZOOM_THR_MIN, ZOOM_THR_MAX = 0.08, 0.28
+
+# Scroll
+SCROLL_ENTRY_FRAMES = 3
+SCROLL_COOLDOWN = 0.08
+SCROLL_SENSITIVITY = 6
+
+# Right click
+RIGHT_CLICK_HOLD_SEC = 0.45
+
+# Tab swipe
+SWIPE_WINDOW_SEC = 0.35
+SWIPE_MIN_X = 0.18
+SWIPE_MAX_Y = 0.12
+SWIPE_COOLDOWN = 1.2
+
+# Zoom
+ZOOM_COOLDOWN = 0.15
+
+# Mode switch
+MODE_SWITCH_FRAMES = 35
+
+# Screen editor
+BRUSH_MIN = 3
+BRUSH_MAX = 18
+DRAW_SMOOTHING = 0.72
+ERASER_SIZE = 40
+CLEAR_HOLD_SEC = 1.5
+CLICK_DRAG_HOLD_SEC = 0.22
+
+EDITOR_COLORS_RGB = [
+    (255, 60, 60),
+    (255, 160, 30),
+    (255, 230, 30),
+    (60, 220, 60),
+    (60, 140, 255),
+    (180, 60, 220),
+    (255, 255, 255),
+]
+EDITOR_COLORS_BGR = [(b, g, r) for (r, g, b) in EDITOR_COLORS_RGB]
+EDITOR_COLORS_HEX = [f"#{r:02x}{g:02x}{b:02x}" for (r, g, b) in EDITOR_COLORS_RGB]
+
+TRANSPARENT_KEY = "#010101"

@@ -1,0 +1,1 @@
+"""Hand gesture mouse package."""
