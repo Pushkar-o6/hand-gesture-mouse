@@ -12,5 +12,5 @@ pip install opencv-python pyautogui numpy pillow
 Run:
 
 ```bash
-python hand_gesture_mouse/hand_tracing.py
+python -m hand_gesture_mouse.hand_tracing
 ```

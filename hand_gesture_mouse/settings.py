@@ -12,11 +12,18 @@ CAM_WIN_X = 20
 CAM_WIN_Y = 20
 
 # Cursor
-SMOOTHING = 0.25
-CURSOR_SMOOTH_FRAMES = 5
+SMOOTHING = 0.32
+CURSOR_SMOOTH_FRAMES = 3
 CAM_MARGIN_X = 0.10
 CAM_MARGIN_Y = 0.10
-DEADZONE = 2.5
+DEADZONE = 1.0
+
+# Hand landmark smoothing (old*alpha + raw*(1-alpha)).
+# Lower alpha = lower latency, higher alpha = more smoothing.
+LANDMARK_SMOOTHING = 0.22
+
+# Threshold smoothing for hand-size normalization.
+HAND_SCALE_SMOOTHING = 0.70
 
 # Gesture thresholds
 PINCH_RATIO = 0.225

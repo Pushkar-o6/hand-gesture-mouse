@@ -39,6 +39,8 @@ from .settings import (
     PINCH_THR_MIN,
     PROC_H,
     PROC_W,
+    HAND_SCALE_SMOOTHING,
+    LANDMARK_SMOOTHING,
     RELEASE_RATIO,
     RELEASE_THR_MAX,
     RELEASE_THR_MIN,
@@ -93,7 +95,7 @@ def webcam_thread():
         min_tracking_confidence=0.60,
     )
 
-    lm_alpha = 0.50
+    lm_alpha = LANDMARK_SMOOTHING
     lm_smooth = None
 
     hsc_smooth = 0.40
@@ -109,6 +111,8 @@ def webcam_thread():
     cursor_y = screen_h // 2
     last_cursor_x = cursor_x
     last_cursor_y = cursor_y
+    last_target_x = cursor_x
+    last_target_y = cursor_y
 
     gesture_state = "IDLE"
     right_click_start = None
@@ -146,6 +150,8 @@ def webcam_thread():
     color_change_done = False
     clear_hold_start = None
     clear_done = False
+    draw_gesture_active = False
+    erase_gesture_active = False
 
     fps_buf = deque(maxlen=30)
     prev_time = time.time()
@@ -235,7 +241,7 @@ def webcam_thread():
             lm = [LMPoint(x, y) for x, y in lm_smooth]
 
             raw_hsc = hand_scale(lm)
-            hsc_smooth = hsc_smooth * 0.85 + raw_hsc * 0.15
+            hsc_smooth = hsc_smooth * HAND_SCALE_SMOOTHING + raw_hsc * (1 - HAND_SCALE_SMOOTHING)
             hsc = hsc_smooth
 
             pinch_thr = float(np.clip(PINCH_RATIO * hsc, PINCH_THR_MIN, PINCH_THR_MAX))
@@ -266,8 +272,27 @@ def webcam_thread():
             cy_buf.append(ty_s)
             cx_med = int(sorted(cx_buf)[len(cx_buf) // 2])
             cy_med = int(sorted(cy_buf)[len(cy_buf) // 2])
-            cursor_x = int(cursor_x * SMOOTHING + cx_med * (1 - SMOOTHING))
-            cursor_y = int(cursor_y * SMOOTHING + cy_med * (1 - SMOOTHING))
+
+            # Blend median and raw target to keep stability without adding too much latency.
+            target_x = int(cx_med * 0.70 + tx_s * 0.30)
+            target_y = int(cy_med * 0.70 + ty_s * 0.30)
+
+            # Adaptive smoothing: smooth more when hand is steady, less when moving fast.
+            speed_px = float(np.hypot(target_x - last_target_x, target_y - last_target_y))
+            speed_norm = float(np.clip((speed_px - 4.0) / 80.0, 0.0, 1.0))
+            adaptive_smoothing = max(0.08, SMOOTHING - 0.22 * speed_norm)
+
+            # Tiny prediction improves responsiveness for quick cursor motion.
+            pred_x = int(target_x + 0.15 * (target_x - last_target_x))
+            pred_y = int(target_y + 0.15 * (target_y - last_target_y))
+            pred_x = int(np.clip(pred_x, 0, screen_w - 1))
+            pred_y = int(np.clip(pred_y, 0, screen_h - 1))
+
+            cursor_x = int(cursor_x * adaptive_smoothing + pred_x * (1 - adaptive_smoothing))
+            cursor_y = int(cursor_y * adaptive_smoothing + pred_y * (1 - adaptive_smoothing))
+
+            last_target_x = target_x
+            last_target_y = target_y
 
             if is_ily_gesture(lm):
                 mode_switch_frames += 1
@@ -294,6 +319,8 @@ def webcam_thread():
                     finalize_active_stroke()
                     clear_hold_start = None
                     clear_done = False
+                    draw_gesture_active = False
+                    erase_gesture_active = False
                     cx_buf.clear()
                     cy_buf.clear()
                     try_put_ctrl(("mode", new_mode))
@@ -399,9 +426,21 @@ def webcam_thread():
                         moved_x = abs(cursor_x - last_cursor_x)
                         moved_y = abs(cursor_y - last_cursor_y)
                         if moved_x > DEADZONE or moved_y > DEADZONE:
-                            pyautogui.moveTo(cursor_x, cursor_y)
-                            last_cursor_x = cursor_x
-                            last_cursor_y = cursor_y
+                            # Cap sudden jumps from transient landmark glitches.
+                            dx = cursor_x - last_cursor_x
+                            dy = cursor_y - last_cursor_y
+                            step_dist = float(np.hypot(dx, dy))
+                            if step_dist > 180.0:
+                                scale = 180.0 / step_dist
+                                move_x = int(last_cursor_x + dx * scale)
+                                move_y = int(last_cursor_y + dy * scale)
+                            else:
+                                move_x = cursor_x
+                                move_y = cursor_y
+
+                            pyautogui.moveTo(move_x, move_y)
+                            last_cursor_x = move_x
+                            last_cursor_y = move_y
 
                         ix_px = int(ix_n * CAM_W)
                         iy_px = int(iy_n * CAM_H)
@@ -461,6 +500,8 @@ def webcam_thread():
 
                 if d_clear < pinch_thr:
                     finalize_active_stroke()
+                    draw_gesture_active = False
+                    erase_gesture_active = False
                     if clear_hold_start is None:
                         clear_hold_start = now
                     pct = min(1.0, (now - clear_hold_start) / CLEAR_HOLD_SEC)
@@ -480,6 +521,8 @@ def webcam_thread():
 
                     if d_color < pinch_thr:
                         finalize_active_stroke()
+                        draw_gesture_active = False
+                        erase_gesture_active = False
                         if not color_change_done:
                             draw_color_idx = (draw_color_idx + 1) % len(EDITOR_COLORS_HEX)
                             color_change_done = True
@@ -502,8 +545,12 @@ def webcam_thread():
                     else:
                         color_change_done = False
 
-                        if d_erase < draw_pinch_thr:
+                        erase_gesture_active = d_erase < (release_thr if erase_gesture_active else draw_pinch_thr)
+                        draw_gesture_active = d_draw < (release_thr if draw_gesture_active else draw_pinch_thr)
+
+                        if erase_gesture_active:
                             finalize_active_stroke()
+                            draw_gesture_active = False
                             esx, esy = norm_to_screen((mx_n + tx_n) / 2, (my_n + ty_n) / 2, screen_w, screen_h)
                             try_put(draw_queue, ("erase", esx, esy, ERASER_SIZE * 2))
                             try_put(draw_queue, ("cursor", esx, esy, "#aaaaaa", "erase"))
@@ -512,7 +559,8 @@ def webcam_thread():
                             cv2.circle(frame, (mx_px, my_px), 14, (180, 180, 180), 2)
                             cv2.putText(frame, "ERASING", (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 2)
 
-                        elif d_draw < draw_pinch_thr:
+                        elif draw_gesture_active:
+                            erase_gesture_active = False
                             spread_pct = min(1.0, d_draw / draw_pinch_thr)
                             brush_size = int(BRUSH_MIN + spread_pct * (BRUSH_MAX - BRUSH_MIN))
 
@@ -564,6 +612,8 @@ def webcam_thread():
                             )
 
                         else:
+                            draw_gesture_active = False
+                            erase_gesture_active = False
                             finalize_active_stroke()
                             try_put(draw_queue, ("cursor", sx, sy, "#777777", "penup"))
                             cv2.putText(frame, "PEN UP", (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (130, 130, 130), 2)
@@ -580,6 +630,8 @@ def webcam_thread():
             right_click_done = False
             click_drag_start = None
             clear_hold_start = None
+            draw_gesture_active = False
+            erase_gesture_active = False
             finalize_active_stroke()
             cx_buf.clear()
             cy_buf.clear()
