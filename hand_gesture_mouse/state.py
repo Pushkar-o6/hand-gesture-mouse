@@ -8,6 +8,7 @@ pyautogui.PAUSE = 0
 
 draw_queue = queue.Queue(maxsize=8)
 ctrl_queue = queue.Queue(maxsize=4)
+viewer_queue = queue.Queue(maxsize=4)
 
 _mode_lock = threading.Lock()
 _current_mode = 1
@@ -37,7 +38,14 @@ def try_put(q: queue.Queue, msg) -> None:
     try:
         q.put_nowait(msg)
     except queue.Full:
-        pass
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            q.put_nowait(msg)
+        except queue.Full:
+            pass
 
 
 def try_put_ctrl(msg) -> None:

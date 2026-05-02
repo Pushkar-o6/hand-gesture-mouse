@@ -6,11 +6,12 @@ from .settings import CAM_MARGIN_X, CAM_MARGIN_Y
 
 
 class LMPoint:
-    __slots__ = ("x", "y")
+    __slots__ = ("x", "y", "z")
 
-    def __init__(self, x, y):
+    def __init__(self, x, y, z=0.0):
         self.x = x
         self.y = y
+        self.z = z
 
 
 class OneEuroFilter:
@@ -114,11 +115,9 @@ def dist_batch(lm, pairs):
         List of distances in same order as pairs
     """
     coords = np.array([[lm[i].x, lm[i].y] for i in range(len(lm))], dtype=np.float32)
-    distances = []
-    for a, b in pairs:
-        diff = coords[a] - coords[b]
-        distances.append(float(np.linalg.norm(diff)))
-    return distances
+    pair_idx = np.asarray(pairs, dtype=np.intp)
+    diffs = coords[pair_idx[:, 0]] - coords[pair_idx[:, 1]]
+    return np.linalg.norm(diffs, axis=1).astype(float).tolist()
 
 
 def lm_norm(lm, idx):
@@ -173,6 +172,38 @@ def is_ily_gesture(lm):
         and not is_finger_up(lm, 12, 10)
         and not is_finger_up(lm, 16, 14)
     )
+
+
+def are_fingers_together(lm, proximity_threshold=0.10):
+    """Check if all 4 fingers are joined/close together and extended.
+    
+    Calculates the centroid of all 4 finger tips and checks if each tip
+    is within proximity_threshold distance from the centroid. Also verifies
+    that all 4 fingers are extended (tips above PIPs).
+    
+    Args:
+        lm: Landmark list
+        proximity_threshold: Maximum distance from centroid for fingers to be "together" (normalized 0-1)
+    
+    Returns:
+        bool: True if all 4 finger tips are extended and close together
+    """
+    # First check: all 4 fingers must be extended (tips above PIPs)
+    finger_pairs = [(8, 6), (12, 10), (16, 14), (20, 18)]
+    if not all(is_finger_up(lm, tip, pip) for tip, pip in finger_pairs):
+        return False
+    
+    # Get positions of all 4 finger tips: index, middle, ring, pinky
+    tip_indices = [8, 12, 16, 20]
+    tips = np.array([[lm[i].x, lm[i].y] for i in tip_indices], dtype=np.float32)
+    
+    # Calculate centroid of all 4 finger tips
+    centroid = np.mean(tips, axis=0)
+    
+    # Check if all tips are within threshold distance from centroid
+    distances = np.linalg.norm(tips - centroid, axis=1)
+    
+    return bool(np.all(distances < proximity_threshold))
 
 
 def norm_to_screen(nx, ny, screen_w, screen_h):

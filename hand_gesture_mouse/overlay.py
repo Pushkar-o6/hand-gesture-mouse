@@ -17,6 +17,8 @@ from .state import ctrl_queue, draw_queue, screen_h
 class ScreenOverlay:
     def __init__(self):
         self.root = tk.Tk()
+        self._running = True
+        self._poll_after_id = None
         self.root.title("Screen Editor Overlay")
         self.root.attributes("-fullscreen", True)
         self.root.attributes("-topmost", True)
@@ -45,9 +47,12 @@ class ScreenOverlay:
 
         self._draw_palette()
         self._draw_hud("Mode 1: Mouse Control", "#FF8C00")
-        self.root.after(8, self._poll)
+        self._poll_after_id = self.root.after(8, self._poll)
 
     def _poll(self):
+        if not self._running:
+            return
+
         try:
             while True:
                 self._handle(ctrl_queue.get_nowait())
@@ -60,7 +65,8 @@ class ScreenOverlay:
         except queue.Empty:
             pass
 
-        self.root.after(8, self._poll)
+        if self._running:
+            self._poll_after_id = self.root.after(8, self._poll)
 
     def _handle(self, msg):
         kind = msg[0]
@@ -86,6 +92,23 @@ class ScreenOverlay:
             self.strokes.append(iid)
             if stroke_id is not None:
                 self.live_stroke_ids.setdefault(stroke_id, []).append(iid)
+
+        elif kind == "draw_batch":
+            _, stroke_id, points, color, size = msg
+            if len(points) >= 2:
+                flat = [v for p in points for v in p]
+                iid = self.canvas.create_line(
+                    *flat,
+                    fill=color,
+                    width=size,
+                    capstyle=tk.ROUND,
+                    joinstyle=tk.ROUND,
+                    smooth=True,
+                    splinesteps=12,
+                )
+                self.strokes.append(iid)
+                if stroke_id is not None:
+                    self.live_stroke_ids.setdefault(stroke_id, []).append(iid)
 
         elif kind == "stroke_begin":
             _, stroke_id = msg
@@ -117,10 +140,15 @@ class ScreenOverlay:
                 for iid in self.strokes:
                     self.canvas.itemconfigure(iid, state="hidden")
                 self._draw_hud("Mode 1: Mouse Control", "#FF8C00")
-            else:
+            elif m == 2:
                 for iid in self.strokes:
                     self.canvas.itemconfigure(iid, state="normal")
                 self._draw_hud("Mode 2: Screen Editor  [pinch=draw  2-pinch=erase]", "#00D264")
+            else:
+                for iid in self.strokes:
+                    self.canvas.itemconfigure(iid, state="hidden")
+                self._clear_cursor()
+                self._draw_hud("Mode 3: 3D Object Viewer", "#64C8FF")
 
         elif kind == "cursor":
             _, cx, cy, color, style = msg
@@ -138,7 +166,14 @@ class ScreenOverlay:
             self.save_drawing()
 
         elif kind == "quit":
-            self.root.destroy()
+            self._running = False
+            if self._poll_after_id is not None:
+                try:
+                    self.root.after_cancel(self._poll_after_id)
+                except tk.TclError:
+                    pass
+                self._poll_after_id = None
+            self.root.quit()
 
     def _clear_cursor(self):
         for iid in self.cursor_ids:
@@ -432,7 +467,14 @@ class ScreenOverlay:
             print("[Save] pip install Pillow")
 
     def quit(self, event=None):
-        self.root.destroy()
+        self._running = False
+        if self._poll_after_id is not None:
+            try:
+                self.root.after_cancel(self._poll_after_id)
+            except tk.TclError:
+                pass
+            self._poll_after_id = None
+        self.root.quit()
 
     def run(self):
         self.root.mainloop()
