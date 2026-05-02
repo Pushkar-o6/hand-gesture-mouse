@@ -41,7 +41,7 @@ def _capture_thread(frame_q: queue.Queue):
             continue
 
         frame = cv2.flip(frame, 1)
-        try:gi
+        try:
             frame_q.get_nowait()
         except queue.Empty:
             pass
