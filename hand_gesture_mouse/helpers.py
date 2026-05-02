@@ -31,6 +31,21 @@ def is_finger_up(lm, tip, pip):
     return lm[tip].y < lm[pip].y
 
 
+def _angle_deg(a, b, c):
+    ab = np.array([a.x - b.x, a.y - b.y], dtype=np.float32)
+    cb = np.array([c.x - b.x, c.y - b.y], dtype=np.float32)
+    ab_n = np.linalg.norm(ab)
+    cb_n = np.linalg.norm(cb)
+    if ab_n < 1e-6 or cb_n < 1e-6:
+        return 0.0
+    cosang = float(np.dot(ab, cb) / (ab_n * cb_n))
+    return math.degrees(math.acos(np.clip(cosang, -1.0, 1.0)))
+
+
+def is_finger_extended(lm, tip, pip, mcp, angle_deg=165.0):
+    return _angle_deg(lm[tip], lm[pip], lm[mcp]) >= angle_deg
+
+
 def count_fingers_up(lm):
     return sum(1 for t, p in [(8, 6), (12, 10), (16, 14), (20, 18)] if is_finger_up(lm, t, p))
 

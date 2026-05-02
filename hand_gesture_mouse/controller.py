@@ -1,5 +1,7 @@
 import time
 from collections import deque
+import pathlib
+from dataclasses import dataclass
 
 import cv2
 import mediapipe as mp
@@ -11,6 +13,7 @@ from .helpers import (
     dist_norm,
     hand_scale,
     is_finger_up,
+    is_finger_extended,
     is_ily_gesture,
     is_open_palm,
     norm_to_screen,
@@ -22,6 +25,10 @@ from .settings import (
     CAM_W,
     CAM_WIN_X,
     CAM_WIN_Y,
+    CLAHE_CLIP_LIMIT,
+    CLAHE_TILE_GRID,
+        FINGER_ANGLE_THRESH,
+        FINGER_STATE_METHOD,
     CLEAR_HOLD_SEC,
     CLICK_DRAG_HOLD_SEC,
     CURSOR_SMOOTH_FRAMES,
@@ -33,10 +40,20 @@ from .settings import (
     EDITOR_COLORS_BGR,
     EDITOR_COLORS_HEX,
     ERASER_SIZE,
+    DISPLAY_FPS,
+    DISPLAY_VISIBILITY_POLL_SEC,
+    FINGER_ANGLE_THRESH,
+    FINGER_STATE_METHOD,
+    GESTURE_MODEL_PATH,
+    MAX_NUM_HANDS,
+    MODEL_MODE_LABELS,
+    MODEL_SCROLL_LABELS,
+    MODEL_ZOOM_LABELS,
     MODE_SWITCH_FRAMES,
     PINCH_RATIO,
     PINCH_THR_MAX,
     PINCH_THR_MIN,
+    PRIMARY_HAND,
     PROC_H,
     PROC_W,
     HAND_SCALE_SMOOTHING,
@@ -51,6 +68,8 @@ from .settings import (
     SCROLL_SENSITIVITY,
     SCROLL_THR_MAX,
     SCROLL_THR_MIN,
+    USE_CLAHE,
+    USE_GESTURE_MODEL,
     SMOOTHING,
     SWIPE_COOLDOWN,
     SWIPE_MAX_Y,
@@ -74,7 +93,77 @@ from .state import (
     try_put_ctrl,
 )
 
+from .gesture_ml import GestureKNN, extract_features
+@dataclass
+class HandState:
+    key: str
+    handedness: str | None
+    lm: list
+    hsc: float
+    pinch_thr: float
+    draw_pinch_thr: float
+    release_thr: float
+    scroll_thr: float
+    zoom_thr: float
+    ix_n: float
+    iy_n: float
+    mx_n: float
+    my_n: float
+    rx_n: float
+    ry_n: float
+    px_n: float
+    py_n: float
+    tx_n: float
+    ty_n: float
+    wx_n: float
+    wy_n: float
+    d_click: float
+    d_scroll: float
+    d_right: float
+    d_draw: float
+    d_erase: float
+    d_color: float
+    d_clear: float
+    index_up: bool
+    middle_up: bool
+    index_extended: bool
+    middle_extended: bool
+    open_palm: bool
+    ily: bool
+    gesture_label: str
 
+
+def _resolve_model_path(path_str: str) -> pathlib.Path:
+    path = pathlib.Path(path_str)
+    if path.is_absolute():
+        return path
+    return pathlib.Path(__file__).resolve().parent / path
+
+
+def _select_primary(hands: list[HandState]) -> HandState | None:
+    if not hands:
+        return None
+    pref = PRIMARY_HAND.lower()
+    if pref in ("left", "right"):
+        for h in hands:
+            if (h.handedness or "").lower() == pref:
+                return h
+    return max(hands, key=lambda h: h.hsc)
+
+
+def _select_gesture_hand(hands: list[HandState], primary: HandState | None) -> HandState | None:
+    if not hands:
+        return None
+    if len(hands) == 1 or primary is None:
+        return primary
+    pref = PRIMARY_HAND.lower()
+    target = "left" if pref == "right" else "right"
+    for h in hands:
+        if (h.handedness or "").lower() == target:
+            return h
+    for h in hands:
+        if h is not primary:
+            return h
 def webcam_thread():
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
@@ -92,14 +181,25 @@ def webcam_thread():
     mp_hands = mp.solutions.hands
     hands = mp_hands.Hands(
         static_image_mode=False,
-        max_num_hands=1,
+        max_num_hands=MAX_NUM_HANDS,
         model_complexity=0,
         min_detection_confidence=0.60,
         min_tracking_confidence=0.60,
     )
 
     lm_alpha = LANDMARK_SMOOTHING
-    lm_smooth = None
+
+    gesture_model = None
+    if USE_GESTURE_MODEL:
+        model_path = _resolve_model_path(GESTURE_MODEL_PATH)
+        gesture_model = GestureKNN.load(str(model_path))
+
+    clahe = None
+    if USE_CLAHE:
+        clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_GRID)
+
+    lm_smooth_by_key = {}
+    hsc_smooth_by_key = {}
 
     hsc_smooth = 0.40
     pinch_thr = PINCH_RATIO * 0.40
@@ -211,6 +311,15 @@ def webcam_thread():
         frame = cv2.flip(frame, 1)
         small = cv2.resize(frame, (PROC_W, PROC_H))
         rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+
+        if clahe is not None:
+            lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            l = clahe.apply(l)
+            lab = cv2.merge([l, a, b])
+            small = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+
         result = hands.process(rgb)
 
         mode = get_mode()

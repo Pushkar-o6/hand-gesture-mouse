@@ -11,6 +11,13 @@ PROC_W, PROC_H = 480, 360
 CAM_WIN_X = 20
 CAM_WIN_Y = 20
 
+# Multi-hand + preprocessing
+MAX_NUM_HANDS = 2
+PRIMARY_HAND = "right"  # right | left | largest
+USE_CLAHE = True
+CLAHE_CLIP_LIMIT = 2.0
+CLAHE_TILE_GRID = (6, 6)
+
 # Cursor
 SMOOTHING = 0.32
 CURSOR_SMOOTH_FRAMES = 3
@@ -24,6 +31,10 @@ LANDMARK_SMOOTHING = 0.22
 
 # Threshold smoothing for hand-size normalization.
 HAND_SCALE_SMOOTHING = 0.70
+
+# Finger state detection
+FINGER_STATE_METHOD = "angle"  # angle | tip
+FINGER_ANGLE_THRESH = 165.0
 
 # Gesture thresholds
 PINCH_RATIO = 0.225
@@ -62,6 +73,13 @@ ZOOM_COOLDOWN = 0.15
 
 # Mode switch
 MODE_SWITCH_FRAMES = 35
+
+# Optional gesture model (KNN)
+USE_GESTURE_MODEL = False
+GESTURE_MODEL_PATH = "gesture_model.npz"
+MODEL_SCROLL_LABELS = {"SCROLL"}
+MODEL_ZOOM_LABELS = {"ZOOM"}
+MODEL_MODE_LABELS = {"MODE_SWITCH"}
 
 # Screen editor
 BRUSH_MIN = 3
