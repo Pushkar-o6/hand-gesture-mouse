@@ -13,6 +13,114 @@ class LMPoint:
         self.y = y
 
 
+class OneEuroFilter:
+    """Adaptive low-pass filter for pointer smoothing.
+    
+    Reduces jitter while maintaining responsiveness by adapting the smoothing
+    factor based on motion velocity. Standard in interactive systems.
+    
+    Args:
+        freq: Cutoff frequency in Hz (default 120Hz typical for 60fps)
+        mincutoff: Minimum cutoff frequency (default 1.0 Hz)
+        beta: Velocity coefficient controlling adaptation (default 0.007)
+    """
+    
+    __slots__ = ("freq", "mincutoff", "beta", "last_x", "last_dx", "last_t")
+    
+    def __init__(self, freq=120.0, mincutoff=1.0, beta=0.007):
+        self.freq = freq
+        self.mincutoff = mincutoff
+        self.beta = beta
+        self.last_x = None
+        self.last_dx = 0.0
+        self.last_t = None
+    
+    def _smoothing_factor(self, cutoff, dt):
+        """Compute low-pass filtering coefficient."""
+        if dt <= 0:
+            return 1.0
+        r = 2.0 * math.pi * cutoff * dt
+        return r / (r + 1.0)
+    
+    def filter(self, x, t=None):
+        """Apply OneEuro filter to value x at time t.
+        
+        Args:
+            x: Current value (float or (x, y) tuple)
+            t: Current time (seconds). If None, uses internal timing.
+        
+        Returns:
+            Filtered value (same type as input)
+        """
+        if t is None:
+            if self.last_t is None:
+                t = 0.0
+            else:
+                t = self.last_t + 1.0 / self.freq
+        
+        if self.last_t is None:
+            self.last_t = t
+            self.last_x = x
+            return x
+        
+        dt = t - self.last_t
+        if dt < 0:
+            return x
+        
+        # Handle both scalar and tuple inputs
+        is_tuple = isinstance(x, (tuple, list))
+        if is_tuple:
+            x = np.array(x, dtype=np.float32)
+        
+        if self.last_x is None:
+            self.last_x = x.copy() if is_tuple else x
+            dx = 0.0 if not is_tuple else np.array([0.0, 0.0], dtype=np.float32)
+        else:
+            if is_tuple:
+                dx = (x - self.last_x) / max(dt, 1e-6)
+                last_dx = self.last_dx
+                edgef = self._smoothing_factor(self.mincutoff, dt)
+                dx = last_dx + edgef * (dx - last_dx)
+                cutoff = self.mincutoff + self.beta * np.linalg.norm(dx)
+                xf = self._smoothing_factor(cutoff, dt)
+                x_smooth = self.last_x + xf * (x - self.last_x)
+                self.last_x = x_smooth.copy()
+            else:
+                dx = (x - self.last_x) / max(dt, 1e-6)
+                edgef = self._smoothing_factor(self.mincutoff, dt)
+                dx = self.last_dx + edgef * (dx - self.last_dx)
+                cutoff = self.mincutoff + self.beta * abs(dx)
+                xf = self._smoothing_factor(cutoff, dt)
+                x_smooth = self.last_x + xf * (x - self.last_x)
+                self.last_x = x_smooth
+            
+            self.last_dx = dx
+        
+        self.last_t = t
+        
+        if is_tuple:
+            return tuple(self.last_x)
+        return self.last_x
+
+
+def dist_batch(lm, pairs):
+    """Compute multiple distances in a single batch operation.
+    
+    Args:
+        lm: Landmark list
+        pairs: List of (a, b) index tuples to compute distances for
+    
+    Returns:
+        List of distances in same order as pairs
+    """
+    coords = np.array([[lm[i].x, lm[i].y] for i in range(len(lm))], dtype=np.float32)
+    distances = []
+    for a, b in pairs:
+        diff = coords[a] - coords[b]
+        distances.append(float(np.linalg.norm(diff)))
+    return distances
+
+
 def lm_norm(lm, idx):
     return lm[idx].x, lm[idx].y
 

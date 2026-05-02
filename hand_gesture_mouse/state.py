@@ -6,8 +6,8 @@ import pyautogui
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0
 
-draw_queue = queue.Queue(maxsize=120)
-ctrl_queue = queue.Queue(maxsize=32)
+draw_queue = queue.Queue(maxsize=8)
+ctrl_queue = queue.Queue(maxsize=4)
 
 _mode_lock = threading.Lock()
 _current_mode = 1
@@ -16,8 +16,8 @@ screen_w, screen_h = pyautogui.size()
 
 
 def get_mode() -> int:
-    with _mode_lock:
-        return _current_mode
+    # Single int reads are GIL-atomic in CPython; no lock needed
+    return _current_mode
 
 
 def set_mode(mode: int) -> None:

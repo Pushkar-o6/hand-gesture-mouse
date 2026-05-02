@@ -1,6 +1,7 @@
+import ctypes
+import pathlib
 import time
 from collections import deque
-import pathlib
 from dataclasses import dataclass
 
 import cv2
@@ -10,6 +11,7 @@ import pyautogui
 
 from .helpers import (
     LMPoint,
+    dist_batch,
     dist_norm,
     hand_scale,
     is_finger_up,
@@ -27,8 +29,6 @@ from .settings import (
     CAM_WIN_Y,
     CLAHE_CLIP_LIMIT,
     CLAHE_TILE_GRID,
-        FINGER_ANGLE_THRESH,
-        FINGER_STATE_METHOD,
     CLEAR_HOLD_SEC,
     CLICK_DRAG_HOLD_SEC,
     CURSOR_SMOOTH_FRAMES,
@@ -94,6 +94,29 @@ from .state import (
 )
 
 from .gesture_ml import GestureKNN, extract_features
+
+
+if hasattr(ctypes, "windll"):
+    _SET_CURSOR_POS = ctypes.windll.user32.SetCursorPos
+else:
+    _SET_CURSOR_POS = None
+
+
+def _move_cursor(x: int, y: int) -> None:
+    if _SET_CURSOR_POS is not None:
+        _SET_CURSOR_POS(int(x), int(y))
+    else:
+        pyautogui.moveTo(int(x), int(y))
+
+
+def _hand_key(handedness: str | None, index: int) -> str:
+    return f"{(handedness or 'hand').lower()}:{index}"
+
+def _finger_state(lm, tip: int, pip: int, mcp: int) -> bool:
+    if FINGER_STATE_METHOD == "angle":
+        return is_finger_extended(lm, tip, pip, mcp, angle_deg=FINGER_ANGLE_THRESH)
+    return is_finger_up(lm, tip, pip)
+
 @dataclass
 class HandState:
     key: str
@@ -164,6 +187,92 @@ def _select_gesture_hand(hands: list[HandState], primary: HandState | None) -> H
     for h in hands:
         if h is not primary:
             return h
+    return primary
+
+
+def _build_hand_state(hand_landmarks, handedness: str | None, key: str, lm_smooth_by_key, hsc_smooth_by_key, lm_alpha: float) -> HandState:
+    raw_lm = hand_landmarks.landmark
+    raw_coords = np.array([[pt.x, pt.y] for pt in raw_lm], dtype=np.float32)
+    
+    if key not in lm_smooth_by_key:
+        lm_smooth_by_key[key] = raw_coords.copy()
+    else:
+        # Vectorized exponential averaging: smooth = smooth * alpha + raw * (1 - alpha)
+        smooth = lm_smooth_by_key[key]
+        np.multiply(smooth, lm_alpha, out=smooth)
+        np.multiply(raw_coords, 1 - lm_alpha, out=raw_coords)
+        np.add(smooth, raw_coords, out=smooth)
+
+    lm = [LMPoint(float(x), float(y)) for x, y in lm_smooth_by_key[key]]
+    raw_hsc = hand_scale(lm)
+    prev_hsc = hsc_smooth_by_key.get(key, raw_hsc)
+    hsc = prev_hsc * HAND_SCALE_SMOOTHING + raw_hsc * (1 - HAND_SCALE_SMOOTHING)
+    hsc_smooth_by_key[key] = hsc
+
+    pinch_thr = float(np.clip(PINCH_RATIO * hsc, PINCH_THR_MIN, PINCH_THR_MAX))
+    draw_pinch_thr = float(np.clip(DRAW_PINCH_RATIO * hsc, DRAW_PINCH_THR_MIN, DRAW_PINCH_THR_MAX))
+    release_thr = float(np.clip(RELEASE_RATIO * hsc, RELEASE_THR_MIN, RELEASE_THR_MAX))
+    scroll_thr = float(np.clip(SCROLL_RATIO * hsc, SCROLL_THR_MIN, SCROLL_THR_MAX))
+    zoom_thr = float(np.clip(ZOOM_RATIO * hsc, ZOOM_THR_MIN, ZOOM_THR_MAX))
+
+    ix_n, iy_n = lm[8].x, lm[8].y
+    mx_n, my_n = lm[12].x, lm[12].y
+    rx_n, ry_n = lm[16].x, lm[16].y
+    px_n, py_n = lm[20].x, lm[20].y
+    tx_n, ty_n = lm[4].x, lm[4].y
+    wx_n, wy_n = lm[0].x, lm[0].y
+
+    # Batch compute all pinch distances (vectorized)
+    d_click, d_scroll, d_right, d_draw, d_erase, d_color, d_clear = dist_batch(
+        lm, [(12, 4), (8, 12), (12, 4), (8, 4), (12, 4), (16, 4), (20, 4)]
+    )
+
+    index_up = _finger_state(lm, 8, 6, 5)
+    middle_up = _finger_state(lm, 12, 10, 9)
+    index_extended = index_up
+    middle_extended = middle_up
+    open_palm = sum(1 for tip, pip, mcp in [(8, 6, 5), (12, 10, 9), (16, 14, 13), (20, 18, 17)] if _finger_state(lm, tip, pip, mcp)) == 4
+    ily = index_up and _finger_state(lm, 20, 18, 17) and not middle_up and not _finger_state(lm, 16, 14, 13)
+
+    return HandState(
+        key=key,
+        handedness=handedness,
+        lm=lm,
+        hsc=hsc,
+        pinch_thr=pinch_thr,
+        draw_pinch_thr=draw_pinch_thr,
+        release_thr=release_thr,
+        scroll_thr=scroll_thr,
+        zoom_thr=zoom_thr,
+        ix_n=ix_n,
+        iy_n=iy_n,
+        mx_n=mx_n,
+        my_n=my_n,
+        rx_n=rx_n,
+        ry_n=ry_n,
+        px_n=px_n,
+        py_n=py_n,
+        tx_n=tx_n,
+        ty_n=ty_n,
+        wx_n=wx_n,
+        wy_n=wy_n,
+        d_click=d_click,
+        d_scroll=d_scroll,
+        d_right=d_right,
+        d_draw=d_draw,
+        d_erase=d_erase,
+        d_color=d_color,
+        d_clear=d_clear,
+        index_up=index_up,
+        middle_up=middle_up,
+        index_extended=index_extended,
+        middle_extended=middle_extended,
+        open_palm=open_palm,
+        ily=ily,
+        gesture_label="",
+    )
+
+
 def webcam_thread():
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cap.isOpened():
@@ -310,14 +419,11 @@ def webcam_thread():
 
         frame = cv2.flip(frame, 1)
         small = cv2.resize(frame, (PROC_W, PROC_H))
-        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-
         if clahe is not None:
             lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            l = clahe.apply(l)
-            lab = cv2.merge([l, a, b])
-            small = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        else:
             rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
 
         result = hands.process(rgb)
@@ -332,57 +438,88 @@ def webcam_thread():
         now = time.time()
 
         if result.multi_hand_landmarks:
-            hand = result.multi_hand_landmarks[0]
-            raw_lm = hand.landmark
+            hand_states = []
+            handedness_entries = result.multi_handedness or []
+            for idx, hand_landmarks in enumerate(result.multi_hand_landmarks):
+                handedness = None
+                if idx < len(handedness_entries) and handedness_entries[idx].classification:
+                    handedness = handedness_entries[idx].classification[0].label.lower()
+                hand_states.append(
+                    _build_hand_state(
+                        hand_landmarks,
+                        handedness,
+                        _hand_key(handedness, idx),
+                        lm_smooth_by_key,
+                        hsc_smooth_by_key,
+                        lm_alpha,
+                    )
+                )
 
-            if lm_smooth is None:
-                lm_smooth = [[lk.x, lk.y] for lk in raw_lm]
-            else:
-                for i, lk in enumerate(raw_lm):
-                    lm_smooth[i][0] = lm_smooth[i][0] * lm_alpha + lk.x * (1 - lm_alpha)
-                    lm_smooth[i][1] = lm_smooth[i][1] * lm_alpha + lk.y * (1 - lm_alpha)
+            primary_state = _select_primary(hand_states)
+            gesture_state = _select_gesture_hand(hand_states, primary_state) or primary_state
+            if primary_state is None:
+                continue
+
+            lm = primary_state.lm
+            hsc_smooth = primary_state.hsc
+            hsc = hsc_smooth
+            pinch_thr = primary_state.pinch_thr
+            draw_pinch_thr = primary_state.draw_pinch_thr
+            release_thr = primary_state.release_thr
+            scroll_thr = primary_state.scroll_thr
+            zoom_thr = primary_state.zoom_thr
+            ix_n, iy_n = primary_state.ix_n, primary_state.iy_n
+            mx_n, my_n = primary_state.mx_n, primary_state.my_n
+            rx_n, ry_n = primary_state.rx_n, primary_state.ry_n
+            px_n, py_n = primary_state.px_n, primary_state.py_n
+            tx_n, ty_n = primary_state.tx_n, primary_state.ty_n
+            wx_n, wy_n = primary_state.wx_n, primary_state.wy_n
+
+            d_click = primary_state.d_click
+            d_scroll = primary_state.d_scroll
+            d_right = primary_state.d_right
+            d_draw = primary_state.d_draw
+            d_erase = primary_state.d_erase
+            d_color = primary_state.d_color
+            d_clear = primary_state.d_clear
+
+            index_up = primary_state.index_up
+            middle_up = primary_state.middle_up
+            gesture_lm = gesture_state.lm
+            gesture_ix_n, gesture_iy_n = gesture_state.ix_n, gesture_state.iy_n
+            gesture_mx_n, gesture_my_n = gesture_state.mx_n, gesture_state.my_n
+            gesture_rx_n, gesture_ry_n = gesture_state.rx_n, gesture_state.ry_n
+            gesture_px_n, gesture_py_n = gesture_state.px_n, gesture_state.py_n
+            gesture_tx_n, gesture_ty_n = gesture_state.tx_n, gesture_state.ty_n
+            gesture_wx_n, gesture_wy_n = gesture_state.wx_n, gesture_state.wy_n
+            gesture_d_click = gesture_state.d_click
+            gesture_d_scroll = gesture_state.d_scroll
+            gesture_d_right = gesture_state.d_right
+            gesture_d_draw = gesture_state.d_draw
+            gesture_d_erase = gesture_state.d_erase
+            gesture_d_color = gesture_state.d_color
+            gesture_d_clear = gesture_state.d_clear
+            gesture_pinch_thr = gesture_state.pinch_thr
+            gesture_draw_pinch_thr = gesture_state.draw_pinch_thr
+            gesture_release_thr = gesture_state.release_thr
+            gesture_scroll_thr = gesture_state.scroll_thr
+            gesture_zoom_thr = gesture_state.zoom_thr
+            gesture_index_up = gesture_state.index_up
+            gesture_middle_up = gesture_state.middle_up
+            gesture_open_palm = gesture_state.open_palm
 
             for conn in mp_hands.HAND_CONNECTIONS:
                 a, b = conn
-                ax = int(lm_smooth[a][0] * CAM_W)
-                ay = int(lm_smooth[a][1] * CAM_H)
-                bx = int(lm_smooth[b][0] * CAM_W)
-                by = int(lm_smooth[b][1] * CAM_H)
+                ax = int(primary_state.lm[a].x * CAM_W)
+                ay = int(primary_state.lm[a].y * CAM_H)
+                bx = int(primary_state.lm[b].x * CAM_W)
+                by = int(primary_state.lm[b].y * CAM_H)
                 cv2.line(frame, (ax, ay), (bx, by), (80, 80, 220), 1)
-            for i, (sx_lm, sy_lm) in enumerate(lm_smooth):
-                px = int(sx_lm * CAM_W)
-                py = int(sy_lm * CAM_H)
+            for i, lm_pt in enumerate(primary_state.lm):
+                px = int(lm_pt.x * CAM_W)
+                py = int(lm_pt.y * CAM_H)
                 r = 4 if i in (4, 8, 12, 16, 20) else 2
                 cv2.circle(frame, (px, py), r, (0, 255, 180), -1)
-
-            lm = [LMPoint(x, y) for x, y in lm_smooth]
-
-            raw_hsc = hand_scale(lm)
-            hsc_smooth = hsc_smooth * HAND_SCALE_SMOOTHING + raw_hsc * (1 - HAND_SCALE_SMOOTHING)
-            hsc = hsc_smooth
-
-            pinch_thr = float(np.clip(PINCH_RATIO * hsc, PINCH_THR_MIN, PINCH_THR_MAX))
-            draw_pinch_thr = float(np.clip(DRAW_PINCH_RATIO * hsc, DRAW_PINCH_THR_MIN, DRAW_PINCH_THR_MAX))
-            release_thr = float(np.clip(RELEASE_RATIO * hsc, RELEASE_THR_MIN, RELEASE_THR_MAX))
-            scroll_thr = float(np.clip(SCROLL_RATIO * hsc, SCROLL_THR_MIN, SCROLL_THR_MAX))
-            zoom_thr = float(np.clip(ZOOM_RATIO * hsc, ZOOM_THR_MIN, ZOOM_THR_MAX))
-            ix_n, iy_n = lm[8].x, lm[8].y
-            mx_n, my_n = lm[12].x, lm[12].y
-            rx_n, ry_n = lm[16].x, lm[16].y
-            px_n, py_n = lm[20].x, lm[20].y
-            tx_n, ty_n = lm[4].x, lm[4].y
-            wx_n, wy_n = lm[0].x, lm[0].y
-
-            d_click = dist_norm(lm, 12, 4)
-            d_scroll = dist_norm(lm, 8, 12)
-            d_right = dist_norm(lm, 8, 4)
-            d_draw = dist_norm(lm, 8, 4)
-            d_erase = dist_norm(lm, 12, 4)
-            d_color = dist_norm(lm, 16, 4)
-            d_clear = dist_norm(lm, 20, 4)
-
-            index_up = is_finger_up(lm, 8, 6)
-            middle_up = is_finger_up(lm, 12, 10)
 
             tx_s, ty_s = norm_to_screen(ix_n, iy_n, screen_w, screen_h)
             cx_buf.append(tx_s)
@@ -411,7 +548,7 @@ def webcam_thread():
             last_target_x = target_x
             last_target_y = target_y
 
-            if is_ily_gesture(lm):
+            if is_ily_gesture(gesture_lm):
                 mode_switch_frames += 1
                 prog = int((mode_switch_frames / MODE_SWITCH_FRAMES) * (CAM_W - 20))
                 cv2.rectangle(frame, (10, CAM_H - 22), (10 + prog, CAM_H - 10), (0, 255, 200), -1)
@@ -452,7 +589,7 @@ def webcam_thread():
             if mode == 1:
                 try_put(draw_queue, ("cursor_hide",))
 
-                window_switch_pinched = d_color < (release_thr if window_switch_active else pinch_thr)
+                window_switch_pinched = gesture_d_color < (gesture_release_thr if window_switch_active else gesture_pinch_thr)
 
                 if window_switch_pinched:
                     if not window_switch_active:
@@ -460,8 +597,8 @@ def webcam_thread():
                             window_switch_hold_start = now
 
                         hold_pct = min(1.0, (now - window_switch_hold_start) / WINDOW_SWITCH_HOLD_SEC)
-                        rx_px = int(rx_n * CAM_W)
-                        ry_px = int(ry_n * CAM_H)
+                        rx_px = int(gesture_rx_n * CAM_W)
+                        ry_px = int(gesture_ry_n * CAM_H)
                         cv2.ellipse(
                             frame,
                             (rx_px, ry_px),
@@ -486,13 +623,13 @@ def webcam_thread():
                             pyautogui.keyDown("alt")
                             pyautogui.press("tab")
                             window_switch_active = True
-                            window_switch_anchor_x = (tx_n + rx_n) / 2.0
+                            window_switch_anchor_x = (gesture_tx_n + gesture_rx_n) / 2.0
                             last_window_switch_step = now
                             scroll_mode_active = False
                             scroll_anchor_y = None
                             zoom_anchor_dist = None
                     else:
-                        pinch_center_x = (tx_n + rx_n) / 2.0
+                        pinch_center_x = (gesture_tx_n + gesture_rx_n) / 2.0
                         if window_switch_anchor_x is None:
                             window_switch_anchor_x = pinch_center_x
 
@@ -521,14 +658,14 @@ def webcam_thread():
                         pyautogui.keyUp("alt")
                         window_switch_active = False
 
-                wrist_history.append((wx_n, wy_n, now))
+                wrist_history.append((gesture_wx_n, gesture_wy_n, now))
                 while wrist_history and now - wrist_history[0][2] > SWIPE_WINDOW_SEC:
                     wrist_history.popleft()
 
-                if is_open_palm(lm) and len(wrist_history) >= 4 and (now - last_swipe_time) > SWIPE_COOLDOWN:
+                if is_open_palm(gesture_lm) and len(wrist_history) >= 4 and (now - last_swipe_time) > SWIPE_COOLDOWN:
                     x0, y0, _ = wrist_history[0]
-                    net_x = wx_n - x0
-                    net_y = abs(wy_n - y0)
+                    net_x = gesture_wx_n - x0
+                    net_y = abs(gesture_wy_n - y0)
                     if abs(net_x) > SWIPE_MIN_X and net_y < SWIPE_MAX_Y:
                         if net_x > 0:
                             pyautogui.hotkey("ctrl", "shift", "tab")
@@ -568,8 +705,8 @@ def webcam_thread():
 
                 ring_dn = not is_finger_up(lm, 16, 14)
                 pinky_dn = not is_finger_up(lm, 20, 18)
-                zoom_norm = dist_norm(lm, 8, 12)
-                if index_up and middle_up and ring_dn and pinky_dn and zoom_norm > zoom_thr:
+                zoom_norm = dist_norm(gesture_lm, 8, 12)
+                if gesture_index_up and gesture_middle_up and ring_dn and pinky_dn and zoom_norm > gesture_zoom_thr:
                     if zoom_anchor_dist is None:
                         zoom_anchor_dist = zoom_norm
                     else:
@@ -578,24 +715,24 @@ def webcam_thread():
                             pyautogui.hotkey("ctrl", "+" if delta > 0 else "-")
                             zoom_anchor_dist = zoom_norm
                             last_zoom_time = now
-                    ix_px = int(ix_n * CAM_W)
-                    iy_px = int(iy_n * CAM_H)
-                    mx_px = int(mx_n * CAM_W)
-                    my_px = int(my_n * CAM_H)
+                    ix_px = int(gesture_ix_n * CAM_W)
+                    iy_px = int(gesture_iy_n * CAM_H)
+                    mx_px = int(gesture_mx_n * CAM_W)
+                    my_px = int(gesture_my_n * CAM_H)
                     cv2.line(frame, (ix_px, iy_px), (mx_px, my_px), (255, 200, 0), 2)
                     cv2.putText(frame, "ZOOM", (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)
                 else:
                     zoom_anchor_dist = None
 
-                if d_scroll < scroll_thr:
+                if gesture_d_scroll < gesture_scroll_thr:
                     fingers_together_cnt += 1
                     if fingers_together_cnt >= SCROLL_ENTRY_FRAMES:
                         scroll_mode_active = True
 
                     if scroll_mode_active:
                         if scroll_anchor_y is None:
-                            scroll_anchor_y = iy_n
-                        scroll_delta = iy_n - scroll_anchor_y
+                            scroll_anchor_y = gesture_iy_n
+                        scroll_delta = gesture_iy_n - scroll_anchor_y
                         if abs(scroll_delta) > 0.005 and (now - last_scroll_time) > SCROLL_COOLDOWN:
                             direction = -1 if scroll_delta > 0 else 1
                             scroll_ticks = max(1, int(abs(scroll_delta) * 40))
@@ -603,8 +740,8 @@ def webcam_thread():
                             last_scroll_time = now
                         anc_py = int(scroll_anchor_y * CAM_H)
                         cv2.line(frame, (0, anc_py), (CAM_W, anc_py), (0, 255, 255), 1)
-                        ix_px = int(ix_n * CAM_W)
-                        iy_px = int(iy_n * CAM_H)
+                        ix_px = int(gesture_ix_n * CAM_W)
+                        iy_px = int(gesture_iy_n * CAM_H)
                         cv2.circle(frame, (ix_px, iy_px), 10, (0, 255, 255), 2)
                         cv2.putText(frame, "SCROLLING", (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
@@ -629,7 +766,7 @@ def webcam_thread():
                                 move_x = cursor_x
                                 move_y = cursor_y
 
-                            pyautogui.moveTo(move_x, move_y)
+                            _move_cursor(move_x, move_y)
                             last_cursor_x = move_x
                             last_cursor_y = move_y
 
@@ -848,7 +985,8 @@ def webcam_thread():
         fps_buf.append(1 / max(now - prev_time, 0.001))
         prev_time = now
         fps = int(sum(fps_buf) / len(fps_buf))
-        cv2.putText(frame, f"FPS:{fps}", (CAM_W - 70, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
+        if DISPLAY_FPS:
+            cv2.putText(frame, f"FPS:{fps}", (CAM_W - 70, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
 
         if result.multi_hand_landmarks:
             dist_pct = min(1.0, hsc_smooth / 0.55)

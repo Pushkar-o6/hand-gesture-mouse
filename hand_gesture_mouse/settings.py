@@ -74,6 +74,10 @@ ZOOM_COOLDOWN = 0.15
 # Mode switch
 MODE_SWITCH_FRAMES = 35
 
+# Display
+DISPLAY_FPS = True
+DISPLAY_VISIBILITY_POLL_SEC = 0.2
+
 # Optional gesture model (KNN)
 USE_GESTURE_MODEL = False
 GESTURE_MODEL_PATH = "gesture_model.npz"
