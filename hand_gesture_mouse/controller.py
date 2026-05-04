@@ -94,6 +94,7 @@ from .settings import (
     ZOOM_RATIO,
     ZOOM_THR_MAX,
     ZOOM_THR_MIN,
+    CURSOR_SMOOTH_FRAMES,
 )
 from .state import (
     draw_queue,
@@ -544,13 +545,14 @@ def webcam_thread(frame_q=None):
     scroll_thr = SCROLL_RATIO * 0.40
     zoom_thr = ZOOM_RATIO * 0.40
 
-    # OneEuroFilter for cursor smoothing. Higher beta keeps fast hand motion crisp.
-    oef_x = OneEuroFilter(freq=60.0, mincutoff=1.35, beta=0.022)
-    oef_y = OneEuroFilter(freq=60.0, mincutoff=1.35, beta=0.022)
+    # OneEuroFilter for cursor smoothing. Low mincutoff = smooth micro-movements. Lower beta = less speed-based jitter.
+    oef_x = OneEuroFilter(freq=60.0, mincutoff=0.05, beta=0.01)
+    oef_y = OneEuroFilter(freq=60.0, mincutoff=0.05, beta=0.01)
     cursor_x = screen_w // 2
     cursor_y = screen_h // 2
     last_cursor_x = cursor_x
     last_cursor_y = cursor_y
+    cursor_history = deque(maxlen=max(1, CURSOR_SMOOTH_FRAMES))
 
     gesture_state = "IDLE"
     right_click_start = None
@@ -821,8 +823,20 @@ def webcam_thread(frame_q=None):
             # OneEuroFilter cursor smoothing: adaptive, responsive, low-latency
             raw_sx, raw_sy = norm_to_screen(pred_ix_n, pred_iy_n, screen_w, screen_h)
             t_now = time.perf_counter()
-            cursor_x = int(oef_x.filter(float(raw_sx), t_now))
-            cursor_y = int(oef_y.filter(float(raw_sy), t_now))
+            
+            # Apply OneEuroFilter
+            filtered_x = oef_x.filter(float(raw_sx), t_now)
+            filtered_y = oef_y.filter(float(raw_sy), t_now)
+            
+            # Apply median/moving avg filtering for extra smoothness against spikes
+            cursor_history.append((filtered_x, filtered_y))
+            hist_x = [pt[0] for pt in cursor_history]
+            hist_y = [pt[1] for pt in cursor_history]
+            avg_x = sorted(hist_x)[len(hist_x) // 2] if len(hist_x) >= 3 else sum(hist_x) / len(hist_x)
+            avg_y = sorted(hist_y)[len(hist_y) // 2] if len(hist_y) >= 3 else sum(hist_y) / len(hist_y)
+            
+            cursor_x = int(avg_x)
+            cursor_y = int(avg_y)
 
             if len(hand_states) == 2:
                 h1, h2 = hand_states[0], hand_states[1]
