@@ -148,7 +148,7 @@ class ScreenOverlay:
                 for iid in self.strokes:
                     self.canvas.itemconfigure(iid, state="hidden")
                 self._clear_cursor()
-                self._draw_hud("Mode 3: 3D Object Viewer", "#64C8FF")
+                self._draw_hud("Mode 1: Mouse Control", "#FF8C00")
 
         elif kind == "cursor":
             _, cx, cy, color, style = msg

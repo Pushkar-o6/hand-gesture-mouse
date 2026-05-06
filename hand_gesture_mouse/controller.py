@@ -57,11 +57,6 @@ from .settings import (
     FINGER_STATE_METHOD,
     MAX_NUM_HANDS,
     MODE_SWITCH_FRAMES,
-    MODE3_ROTATE_GAIN,
-    MODE3_SCALE_MAX,
-    MODE3_SCALE_MIN,
-    MODE3_SEND_FPS,
-    MODE3_TRANSLATE_GAIN,
     PINCH_RATIO,
     PINCH_THR_MAX,
     PINCH_THR_MIN,
@@ -108,11 +103,9 @@ from .state import (
     screen_right,
     screen_top,
     screen_bottom,
-    set_mode,
     toggle_mode,
     try_put,
     try_put_ctrl,
-    viewer_queue,
 )
 
 from . import settings as _settings
@@ -128,17 +121,6 @@ def _move_cursor(x: int, y: int) -> None:
     ni_move_cursor(int(x), int(y))
 
 
-def _try_put_viewer(msg) -> None:
-    try:
-        viewer_queue.put_nowait(msg)
-    except Exception:
-        try:
-            viewer_queue.get_nowait()
-            viewer_queue.put_nowait(msg)
-        except Exception:
-            pass
-
-
 def _get_latest_frame(frame_q):
     frame = frame_q.get()
     while True:
@@ -146,36 +128,6 @@ def _get_latest_frame(frame_q):
             frame = frame_q.get_nowait()
         except queue.Empty:
             return frame
-
-
-def _mode3_measure(h1, h2) -> dict:
-    left, right = sorted((h1, h2), key=lambda h: h.wx_n)
-    i1 = np.array([left.ix_n, left.iy_n], dtype=np.float32)
-    i2 = np.array([right.ix_n, right.iy_n], dtype=np.float32)
-    w1 = np.array([left.wx_n, left.wy_n], dtype=np.float32)
-    w2 = np.array([right.wx_n, right.wy_n], dtype=np.float32)
-    vec = i2 - i1
-    mid = (i1 + i2) * 0.5
-    wrist_vec = w2 - w1
-    return {
-        "vec": vec,
-        "mid": mid,
-        "angle": float(np.arctan2(vec[1], max(abs(vec[0]), 1e-5))),
-        "depth": float(left.lm[0].z - right.lm[0].z),
-        "wrist_dist": float(max(np.linalg.norm(wrist_vec), 1e-5)),
-    }
-
-
-def _mode3_transform(measure: dict, anchor: dict) -> tuple[float, float, float, float, float, float]:
-    mid_delta = measure["mid"] - anchor["mid"]
-    vec_delta = measure["vec"] - anchor["vec"]
-    raw_yaw = float((mid_delta[0] * 1.4 + vec_delta[0] * 0.8) * MODE3_ROTATE_GAIN)
-    raw_pitch = float((mid_delta[1] * 1.2 + vec_delta[1] * 0.8) * MODE3_ROTATE_GAIN)
-    raw_roll = float((measure["angle"] - anchor["angle"]) * 1.35 + (measure["depth"] - anchor["depth"]) * 5.0)
-    raw_scale = float(np.clip(measure["wrist_dist"] / anchor["wrist_dist"], MODE3_SCALE_MIN, MODE3_SCALE_MAX))
-    raw_tx = float(np.clip(mid_delta[0] * MODE3_TRANSLATE_GAIN, -1.4, 1.4))
-    raw_ty = float(np.clip(mid_delta[1] * MODE3_TRANSLATE_GAIN, -1.0, 1.0))
-    return raw_yaw, raw_pitch, raw_roll, raw_scale, raw_tx, raw_ty
 
 
 def _predict_point(nx, ny, now, state: dict, key: str):
@@ -412,10 +364,8 @@ def _draw_hud(frame, mode, fps, hsc_smooth, pinch_thr, active_profile, has_hand)
 
     if mode == 1:
         hints = ["idx=move", "fist=scroll", "mid+th=tap/hold", "tap=click hold=drag", "idx+th=R-click", "spread=zoom", "palm=tab"]
-    elif mode == 2:
-        hints = ["relax=pen up", "idx+th=draw", "mid+th=erase", "rng+th=color", "pky+th(hold)=clear", "S=save"]
     else:
-        hints = ["two palms=viewer", "index vector=rotate", "wrist spread=scale", "fist+fist=reset", "ILY+palm=exit"]
+        hints = ["relax=pen up", "idx+th=draw", "mid+th=erase", "rng+th=color", "pky+th(hold)=clear", "S=save"]
     for i, hint in enumerate(hints):
         cv2.putText(frame, hint, (CAM_W - 145, CAM_H - 110 + i * 15), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1)
 
@@ -583,10 +533,6 @@ def webcam_thread(frame_q=None):
     last_window_switch_step = 0.0
 
     mode_switch_frames = 0
-    mode3_frames = 0
-    mode3_anchor = None
-    mode3_reset_start = None
-    mode3_last_send = 0.0
     macros = _load_macros()
     macro_fired = set()
     last_volume_time = 0.0
@@ -741,10 +687,8 @@ def webcam_thread(frame_q=None):
 
         if mode == 1:
             label, color = "MODE 1: MOUSE", (255, 140, 0)
-        elif mode == 2:
-            label, color = "MODE 2: SCREEN EDITOR", (0, 210, 100)
         else:
-            label, color = "MODE 3: 3D VIEWER", (100, 200, 255)
+            label, color = "MODE 2: SCREEN EDITOR", (0, 210, 100)
         cv2.rectangle(frame, (0, 0), (CAM_W, 36), (25, 25, 25), -1)
         cv2.putText(frame, label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
 
@@ -844,52 +788,7 @@ def webcam_thread(frame_q=None):
             cursor_x = int(avg_x)
             cursor_y = int(avg_y)
 
-            if len(hand_states) == 2:
-                h1, h2 = hand_states[0], hand_states[1]
-                if h1.open_palm and h2.open_palm:
-                    mode3_frames += 1
-                    if mode3_frames >= MODE_SWITCH_FRAMES and mode == 1:
-                        mode3_anchor = _mode3_measure(h1, h2)
-                        set_mode(3)
-                        mode = 3
-                        mode3_frames = 0
-                        try_put_ctrl(("mode", 3))
-                        _try_put_viewer(("active", True))
-                        _try_put_viewer(("reset",))
-                else:
-                    mode3_frames = 0
-
-                if mode == 3:
-                    measure = _mode3_measure(h1, h2)
-                    if mode3_anchor is None:
-                        mode3_anchor = measure
-                        _try_put_viewer(("active", True))
-                    if now - mode3_last_send >= 1.0 / max(MODE3_SEND_FPS, 1):
-                        raw_yaw, raw_pitch, raw_roll, raw_scale, raw_tx, raw_ty = _mode3_transform(measure, mode3_anchor)
-                        _try_put_viewer(("transform", raw_yaw, raw_pitch, raw_roll, raw_scale, raw_tx, raw_ty))
-                        mode3_last_send = now
-
-                    if h1.fist and h2.fist:
-                        if mode3_reset_start is None:
-                            mode3_reset_start = now
-                        elif now - mode3_reset_start >= 1.5:
-                            mode3_anchor = measure
-                            _try_put_viewer(("reset",))
-                            mode3_reset_start = now
-                    else:
-                        mode3_reset_start = None
-
-                    if (h1.ily and h2.open_palm) or (h2.ily and h1.open_palm):
-                        set_mode(1)
-                        mode = 1
-                        mode3_anchor = None
-                        try_put_ctrl(("mode", 1))
-                        _try_put_viewer(("active", False))
-            else:
-                mode3_frames = 0
-                mode3_reset_start = None
-
-            if mode != 3 and is_ily_gesture(gesture_lm):
+            if is_ily_gesture(gesture_lm):
                 mode_switch_frames += 1
                 prog = int((mode_switch_frames / MODE_SWITCH_FRAMES) * (CAM_W - 20))
                 cv2.rectangle(frame, (10, CAM_H - 22), (10 + prog, CAM_H - 10), (0, 255, 200), -1)
@@ -925,9 +824,6 @@ def webcam_thread(frame_q=None):
                     window_switch_hold_start = None
                     window_switch_anchor_x = None
                     try_put_ctrl(("mode", new_mode))
-                    if new_mode != 3:
-                        mode3_anchor = None
-                        _try_put_viewer(("active", False))
             else:
                 mode_switch_frames = 0
                 macro_fired.discard("ILY_HOLD")

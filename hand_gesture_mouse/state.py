@@ -4,7 +4,6 @@ from screeninfo import get_monitors
 
 draw_queue = queue.Queue(maxsize=8)
 ctrl_queue = queue.Queue(maxsize=4)
-viewer_queue = queue.Queue(maxsize=4)
 
 _mode_lock = threading.Lock()
 _current_mode = 1

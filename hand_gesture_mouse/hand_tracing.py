@@ -12,13 +12,11 @@ if __package__ in (None, ""):
     from hand_gesture_mouse.controller import webcam_thread
     from hand_gesture_mouse.settings import CAM_H, CAM_W
     from hand_gesture_mouse.overlay import ScreenOverlay
-    from hand_gesture_mouse.mode3_viewer import viewer_thread
     from hand_gesture_mouse.gui import start_tray_detached
 else:
     from .controller import webcam_thread
     from .settings import CAM_H, CAM_W
     from .overlay import ScreenOverlay
-    from .mode3_viewer import viewer_thread
     from .gui import start_tray_detached
 
 
@@ -63,9 +61,6 @@ def main():
 
     cam_thread = threading.Thread(target=webcam_thread, args=(frame_q,), daemon=True)
     cam_thread.start()
-
-    viewer = threading.Thread(target=viewer_thread, daemon=True)
-    viewer.start()
 
     overlay = ScreenOverlay()
     overlay.run()
