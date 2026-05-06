@@ -407,7 +407,7 @@ def _draw_hud(frame, mode, fps, hsc_smooth, pinch_thr, active_profile, has_hand)
         )
 
     if mode == 1:
-        hints = ["idx=move", "idx+mid=scroll", "mid+th=tap/hold", "tap=click hold=drag", "idx+th=R-click", "spread=zoom", "palm=tab"]
+        hints = ["idx=move", "fist=scroll", "mid+th=tap/hold", "tap=click hold=drag", "idx+th=R-click", "spread=zoom", "palm=tab"]
     elif mode == 2:
         hints = ["relax=pen up", "idx+th=draw", "mid+th=erase", "rng+th=color", "pky+th(hold)=clear", "S=save"]
     else:
@@ -525,8 +525,8 @@ def webcam_thread(frame_q=None):
         static_image_mode=False,
         max_num_hands=MAX_NUM_HANDS,
         model_complexity=0,
-        min_detection_confidence=0.60,
-        min_tracking_confidence=0.60,
+        min_detection_confidence=0.70,
+        min_tracking_confidence=0.75,
     )
 
     lm_alpha = LANDMARK_SMOOTHING
@@ -546,8 +546,8 @@ def webcam_thread(frame_q=None):
     zoom_thr = ZOOM_RATIO * 0.40
 
     # OneEuroFilter for cursor smoothing. Low mincutoff = smooth micro-movements. Lower beta = less speed-based jitter.
-    oef_x = OneEuroFilter(freq=60.0, mincutoff=0.05, beta=0.01)
-    oef_y = OneEuroFilter(freq=60.0, mincutoff=0.05, beta=0.01)
+    oef_x = OneEuroFilter(freq=60.0, mincutoff=1.5, beta=0.15)
+    oef_y = OneEuroFilter(freq=60.0, mincutoff=1.5, beta=0.15)
     cursor_x = screen_w // 2
     cursor_y = screen_h // 2
     last_cursor_x = cursor_x
@@ -795,6 +795,7 @@ def webcam_thread(frame_q=None):
 
             index_up = primary_state.index_up
             middle_up = primary_state.middle_up
+            fist = primary_state.fist
             gesture_lm = gesture_hand.lm
             gesture_ix_n, gesture_iy_n = gesture_hand.ix_n, gesture_hand.iy_n
             gesture_mx_n, gesture_my_n = gesture_hand.mx_n, gesture_hand.my_n
@@ -1073,38 +1074,35 @@ def webcam_thread(frame_q=None):
                 else:
                     zoom_anchor_dist = None
 
-                # Scroll feature: activate when 4 fingers are joined together, scroll with wrist movement
-                if gesture_hand.fingers_together:
+                # Scroll feature: activate when hand is closed in a fist (like grabbing the page)
+                if fist:
                     fingers_together_cnt += 1
                     if fingers_together_cnt >= SCROLL_ENTRY_FRAMES:
                         scroll_mode_active = True
 
                     if scroll_mode_active:
                         if scroll_anchor_y is None:
-                            scroll_anchor_y = gesture_wy_n  # Use wrist Y position for scroll reference
+                            # Use wrist Y position for scroll reference since fingers are curled
+                            scroll_anchor_y = wy_n
                         
-                        # Calculate vertical movement from wrist position
-                        scroll_delta = gesture_wy_n - scroll_anchor_y
+                        scroll_delta = wy_n - scroll_anchor_y
                         
                         if abs(scroll_delta) > 0.005 and (now - last_scroll_time) > SCROLL_COOLDOWN:
-                            # Hand moving down (delta > 0) = scroll down (direction = 1)
-                            # Hand moving up (delta < 0) = scroll up (direction = -1)
-                            direction = 1 if scroll_delta > 0 else -1
-                            scroll_ticks = max(1, int(abs(scroll_delta) * 40))
-                            pyautogui.scroll(direction * scroll_ticks * SCROLL_SENSITIVITY)
+                            # Hand moving down (delta > 0) = scroll down (direction = -1 on Windows)
+                            direction = -1 if scroll_delta > 0 else 1
+                            # Exaggerate delta slightly for smoother scrolling
+                            scroll_ticks = max(1, int(abs(scroll_delta) * 100))
+                            pyautogui.scroll(int(direction * scroll_ticks * SCROLL_SENSITIVITY))
                             last_scroll_time = now
-                            scroll_anchor_y = gesture_wy_n  # Update anchor for next scroll
+                            # Smoothly follow anchor rather than hard reset to reduce jitter
+                            scroll_anchor_y = scroll_anchor_y + (scroll_delta * 0.8)
                         
-                        # Visual feedback: show wrist position line
                         anc_py = int(scroll_anchor_y * CAM_H)
                         cv2.line(frame, (0, anc_py), (CAM_W, anc_py), (0, 255, 255), 1)
                         
-                        # Draw all 4 finger tips
-                        for tip_idx in [8, 12, 16, 20]:
-                            tip_x = int(gesture_hand.lm[tip_idx].x * CAM_W)
-                            tip_y = int(gesture_hand.lm[tip_idx].y * CAM_H)
-                            cv2.circle(frame, (tip_x, tip_y), 8, (0, 255, 255), 2)
-                        
+                        wx_px = int(wx_n * CAM_W)
+                        wy_px = int(wy_n * CAM_H)
+                        cv2.circle(frame, (wx_px, wy_px), 12, (0, 255, 255), -1)
                         cv2.putText(frame, "SCROLLING", (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
                 else:
