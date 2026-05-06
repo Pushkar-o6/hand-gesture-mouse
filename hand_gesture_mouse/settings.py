@@ -24,9 +24,11 @@ ADAPTIVE_FRAME_SKIP = False
 # Cursor
 SMOOTHING = 0.32
 CURSOR_SMOOTH_FRAMES = 1
-CAM_MARGIN_X = 0.10
-CAM_MARGIN_Y = 0.10
-DEADZONE = 1.0
+CAM_MARGIN_X = 0.25 # increased margin so hand doesn't need to reach edges
+CAM_MARGIN_Y = 0.35 # increased margin
+MODE2_MARGIN_X = 0.10
+MODE2_MARGIN_Y = 0.10
+DEADZONE = 4.0 # increased from 1.0 to 4.0 to completely ignore micro-jitter pixels
 
 # Hand landmark smoothing (old*alpha + raw*(1-alpha)).
 # Lower alpha = lower latency, higher alpha = more smoothing.
@@ -58,15 +60,15 @@ ZOOM_THR_MIN, ZOOM_THR_MAX = 0.08, 0.28
 # Scroll
 SCROLL_ENTRY_FRAMES = 3
 SCROLL_COOLDOWN = 0.08
-SCROLL_SENSITIVITY = 6
+SCROLL_SENSITIVITY = 2
 
 # Right click
 RIGHT_CLICK_HOLD_SEC = 0.45
 
 # Window switch (Mode 1: ring + thumb hold)
 WINDOW_SWITCH_HOLD_SEC = 0.24
-WINDOW_SWITCH_STEP_X = 0.035
-WINDOW_SWITCH_STEP_COOLDOWN = 0.09
+WINDOW_SWITCH_STEP_X = 0.12 # Much larger required movement to trigger next window (decreases random jumping)
+WINDOW_SWITCH_STEP_COOLDOWN = 0.4 # Slower cooldown between window jumps to prevent runaway 
 
 # Tab swipe
 SWIPE_WINDOW_SEC = 0.35

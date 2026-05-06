@@ -91,6 +91,8 @@ from .settings import (
     WINDOW_SWITCH_HOLD_SEC,
     WINDOW_SWITCH_STEP_COOLDOWN,
     WINDOW_SWITCH_STEP_X,
+    MODE2_MARGIN_X,
+    MODE2_MARGIN_Y,
     ZOOM_COOLDOWN,
     ZOOM_RATIO,
     ZOOM_THR_MAX,
@@ -112,8 +114,6 @@ from .state import (
     try_put_ctrl,
     viewer_queue,
 )
-
-from .gesture_ml import TemporalGestureEngine
 
 from . import settings as _settings
 
@@ -454,7 +454,7 @@ def _build_hand_state(hand_landmarks, handedness: str | None, key: str, lm_smoot
 
     # Batch compute all pinch distances (vectorized)
     d_click, d_scroll, d_right, d_draw, d_erase, d_color, d_clear = dist_batch(
-        lm, [(12, 4), (8, 12), (12, 4), (8, 4), (12, 4), (16, 4), (20, 4)]
+        lm, [(12, 4), (8, 12), (8, 4), (8, 4), (12, 4), (16, 4), (20, 4)]
     )
 
     index_up = _finger_state(lm, 8, 6, 5)
@@ -550,16 +550,13 @@ def webcam_thread(frame_q=None):
     zoom_thr = ZOOM_RATIO * 0.40
 
     # OneEuroFilter for cursor smoothing. Low mincutoff = smooth micro-movements. Lower beta = less speed-based jitter.
-    oef_x = OneEuroFilter(freq=60.0, mincutoff=1.5, beta=0.15)
-    oef_y = OneEuroFilter(freq=60.0, mincutoff=1.5, beta=0.15)
+    oef_x = OneEuroFilter(freq=60.0, mincutoff=0.1, beta=0.002)
+    oef_y = OneEuroFilter(freq=60.0, mincutoff=0.1, beta=0.002)
     cursor_x = screen_left + screen_w // 2
     cursor_y = screen_top + screen_h // 2
     last_cursor_x = cursor_x
     last_cursor_y = cursor_y
     cursor_history = deque(maxlen=max(1, CURSOR_SMOOTH_FRAMES))
-
-    temporal_engine = TemporalGestureEngine(seq_len=15)
-    last_temporal_action = 0.0
 
     gesture_state = "IDLE"
     right_click_start = None
@@ -804,23 +801,6 @@ def webcam_thread(frame_q=None):
             middle_up = primary_state.middle_up
             fist = primary_state.fist
             gesture_lm = gesture_hand.lm
-            
-            # Feed data to temporal engine
-            if mode == 1:
-                temporal_engine.add_frame(gesture_lm)
-                
-            pred_act = temporal_engine.predict()
-            if pred_act != "idle" and (now - last_temporal_action > 0.8):
-                print(f"[ML Engine] Detected gesture: {pred_act}")
-                last_temporal_action = now
-                if pred_act == "swipe_left":
-                    ni_hotkey("ctrl", "shift", "tab")
-                    swipe_flash_label = "<< PREV TAB"
-                    swipe_flash_until = now + 0.8
-                elif pred_act == "swipe_right":
-                    ni_hotkey("ctrl", "tab")
-                    swipe_flash_label = "NEXT TAB >>"
-                    swipe_flash_until = now + 0.8
             
             gesture_ix_n, gesture_iy_n = gesture_hand.ix_n, gesture_hand.iy_n
             gesture_mx_n, gesture_my_n = gesture_hand.mx_n, gesture_hand.my_n
@@ -1210,7 +1190,10 @@ def webcam_thread(frame_q=None):
                 cur_hex = EDITOR_COLORS_HEX[draw_color_idx]
                 cur_bgr = EDITOR_COLORS_BGR[draw_color_idx]
 
-                sx, sy = norm_to_screen(ix_n, iy_n, screen_left, screen_right, screen_top, screen_bottom)
+                sx, sy = norm_to_screen(
+                    ix_n, iy_n, screen_left, screen_right, screen_top, screen_bottom, 
+                    margin_x=MODE2_MARGIN_X, margin_y=MODE2_MARGIN_Y
+                )
 
                 if d_clear < pinch_thr:
                     finalize_active_stroke()
@@ -1265,7 +1248,11 @@ def webcam_thread(frame_q=None):
                         if erase_gesture_active:
                             finalize_active_stroke()
                             draw_gesture_active = False
-                            esx, esy = norm_to_screen((mx_n + tx_n) / 2, (my_n + ty_n) / 2, screen_left, screen_right, screen_top, screen_bottom)
+                            esx, esy = norm_to_screen(
+                                (mx_n + tx_n) / 2, (my_n + ty_n) / 2, 
+                                screen_left, screen_right, screen_top, screen_bottom,
+                                margin_x=MODE2_MARGIN_X, margin_y=MODE2_MARGIN_Y
+                            )
                             try_put(draw_queue, ("erase", esx, esy, ERASER_SIZE * 2))
                             try_put_ctrl(("cursor", esx, esy, "#aaaaaa", "erase"))
                             mx_px = int(mx_n * CAM_W)
@@ -1288,7 +1275,11 @@ def webcam_thread(frame_q=None):
                                 smooth_draw_sx = smooth_draw_sx * DRAW_SMOOTHING + track_x * (1 - DRAW_SMOOTHING)
                                 smooth_draw_sy = smooth_draw_sy * DRAW_SMOOTHING + track_y * (1 - DRAW_SMOOTHING)
 
-                            raw_dsx, raw_dsy = norm_to_screen(smooth_draw_sx, smooth_draw_sy, screen_left, screen_right, screen_top, screen_bottom)
+                            raw_dsx, raw_dsy = norm_to_screen(
+                                smooth_draw_sx, smooth_draw_sy, 
+                                screen_left, screen_right, screen_top, screen_bottom,
+                                margin_x=MODE2_MARGIN_X, margin_y=MODE2_MARGIN_Y
+                            )
                             t_draw = time.perf_counter()
                             dsx = int(draw_oef_x.filter(float(raw_dsx), t_draw))
                             dsy = int(draw_oef_y.filter(float(raw_dsy), t_draw))
