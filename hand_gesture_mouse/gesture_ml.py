@@ -1,8 +1,61 @@
 import os
+import time
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
 
+# Try to import onnxruntime for the temporal model
+try:
+    import onnxruntime as ort
+    HAS_ONNX = True
+except ImportError:
+    HAS_ONNX = False
+
+class TemporalGestureEngine:
+    def __init__(self, model_path="temporal_gesture_model.onnx", seq_len=15):
+        self.seq_len = seq_len
+        self.model_path = model_path
+        self.buffer = deque(maxlen=seq_len)
+        self.session = None
+        self.labels = ["idle", "swipe_left", "swipe_right", "scroll_up", "scroll_down"]
+        
+        if HAS_ONNX and os.path.exists(self.model_path):
+            try:
+                self.session = ort.InferenceSession(self.model_path)
+            except Exception as e:
+                print(f"Failed to load ONNX model: {e}")
+
+    def add_frame(self, lm):
+        """Extract and normalize features for the current frame, add to buffer."""
+        feat = extract_features(lm)
+        self.buffer.append(feat)
+
+    def predict(self) -> str:
+        """Run inference on the buffered sequence."""
+        if len(self.buffer) < self.seq_len:
+            return "idle"
+
+        # If no model is trained/loaded yet, return idle to fallback to heuristics
+        if not self.session:
+            return "idle"
+
+        # Shape: (1, seq_len, num_features)
+        seq_arr = np.array(self.buffer, dtype=np.float32)[np.newaxis, ...]
+        
+        input_name = self.session.get_inputs()[0].name
+        outs = self.session.run(None, {input_name: seq_arr})
+        
+        # Assume outs[0] is logits/probs of shape (1, num_classes)
+        probs = outs[0][0]
+        pred_idx = int(np.argmax(probs))
+        
+        if probs[pred_idx] > 0.75: # Confidence threshold
+            return self.labels[pred_idx]
+        return "idle"
+
+    def clear(self):
+        self.buffer.clear()
 
 @dataclass
 class GestureKNN:

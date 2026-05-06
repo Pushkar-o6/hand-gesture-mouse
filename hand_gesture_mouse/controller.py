@@ -10,7 +10,8 @@ from dataclasses import dataclass
 import cv2
 import mediapipe as mp
 import numpy as np
-import pyautogui
+
+from .native_input import move_cursor as ni_move_cursor, mouse_down as ni_mouse_down, mouse_up as ni_mouse_up, click as ni_click, right_click as ni_right_click, scroll as ni_scroll, press as ni_press, hotkey as ni_hotkey, key_down as ni_key_down, key_up as ni_key_up
 
 from .helpers import (
     LMPoint,
@@ -101,12 +102,18 @@ from .state import (
     get_mode,
     screen_h,
     screen_w,
+    screen_left,
+    screen_right,
+    screen_top,
+    screen_bottom,
     set_mode,
     toggle_mode,
     try_put,
     try_put_ctrl,
     viewer_queue,
 )
+
+from .gesture_ml import TemporalGestureEngine
 
 from . import settings as _settings
 
@@ -118,10 +125,7 @@ else:
 
 
 def _move_cursor(x: int, y: int) -> None:
-    if _SET_CURSOR_POS is not None:
-        _SET_CURSOR_POS(int(x), int(y))
-    else:
-        pyautogui.moveTo(int(x), int(y))
+    ni_move_cursor(int(x), int(y))
 
 
 def _try_put_viewer(msg) -> None:
@@ -247,7 +251,7 @@ def _load_macros():
 def _fire_macro(macros: dict, name: str) -> None:
     keys = macros.get(name)
     if keys:
-        pyautogui.hotkey(*keys)
+        ni_hotkey(*keys)
 
 
 def _active_profile() -> str:
@@ -548,11 +552,14 @@ def webcam_thread(frame_q=None):
     # OneEuroFilter for cursor smoothing. Low mincutoff = smooth micro-movements. Lower beta = less speed-based jitter.
     oef_x = OneEuroFilter(freq=60.0, mincutoff=1.5, beta=0.15)
     oef_y = OneEuroFilter(freq=60.0, mincutoff=1.5, beta=0.15)
-    cursor_x = screen_w // 2
-    cursor_y = screen_h // 2
+    cursor_x = screen_left + screen_w // 2
+    cursor_y = screen_top + screen_h // 2
     last_cursor_x = cursor_x
     last_cursor_y = cursor_y
     cursor_history = deque(maxlen=max(1, CURSOR_SMOOTH_FRAMES))
+
+    temporal_engine = TemporalGestureEngine(seq_len=15)
+    last_temporal_action = 0.0
 
     gesture_state = "IDLE"
     right_click_start = None
@@ -797,6 +804,24 @@ def webcam_thread(frame_q=None):
             middle_up = primary_state.middle_up
             fist = primary_state.fist
             gesture_lm = gesture_hand.lm
+            
+            # Feed data to temporal engine
+            if mode == 1:
+                temporal_engine.add_frame(gesture_lm)
+                
+            pred_act = temporal_engine.predict()
+            if pred_act != "idle" and (now - last_temporal_action > 0.8):
+                print(f"[ML Engine] Detected gesture: {pred_act}")
+                last_temporal_action = now
+                if pred_act == "swipe_left":
+                    ni_hotkey("ctrl", "shift", "tab")
+                    swipe_flash_label = "<< PREV TAB"
+                    swipe_flash_until = now + 0.8
+                elif pred_act == "swipe_right":
+                    ni_hotkey("ctrl", "tab")
+                    swipe_flash_label = "NEXT TAB >>"
+                    swipe_flash_until = now + 0.8
+            
             gesture_ix_n, gesture_iy_n = gesture_hand.ix_n, gesture_hand.iy_n
             gesture_mx_n, gesture_my_n = gesture_hand.mx_n, gesture_hand.my_n
             gesture_rx_n, gesture_ry_n = gesture_hand.rx_n, gesture_hand.ry_n
@@ -822,7 +847,7 @@ def webcam_thread(frame_q=None):
             _draw_skeleton(frame, primary_state.lm, mp_hands.HAND_CONNECTIONS, CAM_W, CAM_H)
 
             # OneEuroFilter cursor smoothing: adaptive, responsive, low-latency
-            raw_sx, raw_sy = norm_to_screen(pred_ix_n, pred_iy_n, screen_w, screen_h)
+            raw_sx, raw_sy = norm_to_screen(pred_ix_n, pred_iy_n, screen_left, screen_right, screen_top, screen_bottom)
             t_now = time.perf_counter()
             
             # Apply OneEuroFilter
@@ -902,7 +927,7 @@ def webcam_thread(frame_q=None):
                         _fire_macro(macros, "ILY_HOLD")
                         macro_fired.add("ILY_HOLD")
                     if window_switch_active:
-                        pyautogui.keyUp("alt")
+                        ni_key_up("alt")
                         window_switch_active = False
                     new_mode = toggle_mode()
                     mode_switch_frames = 0
@@ -970,8 +995,8 @@ def webcam_thread(frame_q=None):
                         )
 
                         if hold_pct >= 1.0:
-                            pyautogui.keyDown("alt")
-                            pyautogui.press("tab")
+                            ni_key_down("alt")
+                            ni_press("tab")
                             window_switch_active = True
                             window_switch_anchor_x = (gesture_tx_n + gesture_rx_n) / 2.0
                             last_window_switch_step = now
@@ -986,9 +1011,9 @@ def webcam_thread(frame_q=None):
                         delta_x = pinch_center_x - window_switch_anchor_x
                         if abs(delta_x) > WINDOW_SWITCH_STEP_X and (now - last_window_switch_step) > WINDOW_SWITCH_STEP_COOLDOWN:
                             if delta_x > 0:
-                                pyautogui.press("tab")
+                                ni_press("tab")
                             else:
-                                pyautogui.hotkey("shift", "tab")
+                                ni_hotkey("shift", "tab")
                             window_switch_anchor_x = pinch_center_x
                             last_window_switch_step = now
 
@@ -1005,7 +1030,7 @@ def webcam_thread(frame_q=None):
                     window_switch_hold_start = None
                     window_switch_anchor_x = None
                     if window_switch_active:
-                        pyautogui.keyUp("alt")
+                        ni_key_up("alt")
                         window_switch_active = False
 
                 wrist_history.append((gesture_wx_n, gesture_wy_n, now))
@@ -1018,10 +1043,10 @@ def webcam_thread(frame_q=None):
                     net_y = abs(gesture_wy_n - y0)
                     if abs(net_x) > SWIPE_MIN_X and net_y < SWIPE_MAX_Y:
                         if net_x > 0:
-                            pyautogui.hotkey("ctrl", "shift", "tab")
+                            ni_hotkey("ctrl", "shift", "tab")
                             swipe_flash_label = "<< PREV TAB"
                         else:
-                            pyautogui.hotkey("ctrl", "tab")
+                            ni_hotkey("ctrl", "tab")
                             swipe_flash_label = "NEXT TAB >>"
                         last_swipe_time = now
                         swipe_flash_until = now + 0.8
@@ -1042,7 +1067,7 @@ def webcam_thread(frame_q=None):
                     if right_click_start is None:
                         right_click_start = now
                     elif not right_click_done and now - right_click_start > RIGHT_CLICK_HOLD_SEC:
-                        pyautogui.rightClick()
+                        ni_right_click()
                         right_click_done = True
                     pct = min(1.0, (now - right_click_start) / RIGHT_CLICK_HOLD_SEC)
                     tx_px = int(tx_n * CAM_W)
@@ -1062,7 +1087,7 @@ def webcam_thread(frame_q=None):
                     else:
                         delta = zoom_norm - zoom_anchor_dist
                         if abs(delta) > 0.018 and (now - last_zoom_time) > ZOOM_COOLDOWN:
-                            pyautogui.hotkey("ctrl", "+" if delta > 0 else "-")
+                            ni_hotkey("ctrl", "+" if delta > 0 else "-")
                             zoom_anchor_dist = zoom_norm
                             last_zoom_time = now
                     ix_px = int(gesture_ix_n * CAM_W)
@@ -1092,7 +1117,7 @@ def webcam_thread(frame_q=None):
                             direction = -1 if scroll_delta > 0 else 1
                             # Exaggerate delta slightly for smoother scrolling
                             scroll_ticks = max(1, int(abs(scroll_delta) * 100))
-                            pyautogui.scroll(int(direction * scroll_ticks * SCROLL_SENSITIVITY))
+                            ni_scroll(int(direction * scroll_ticks * SCROLL_SENSITIVITY))
                             last_scroll_time = now
                             # Smoothly follow anchor rather than hard reset to reduce jitter
                             scroll_anchor_y = scroll_anchor_y + (scroll_delta * 0.8)
@@ -1144,7 +1169,7 @@ def webcam_thread(frame_q=None):
                     hold_t = now - click_drag_start
                     if hold_t >= CLICK_DRAG_HOLD_SEC:
                         if not dragging:
-                            pyautogui.mouseDown()
+                            ni_mouse_down()
                             dragging = True
                         mx_px = int(mx_n * CAM_W)
                         my_px = int(my_n * CAM_H)
@@ -1160,12 +1185,12 @@ def webcam_thread(frame_q=None):
                     if click_drag_start is not None:
                         hold_t = now - click_drag_start
                         if hold_t < CLICK_DRAG_HOLD_SEC and not dragging:
-                            pyautogui.click()
+                            ni_click()
                             gesture_state = "CLICKED"
                         click_drag_start = None
 
                     if dragging:
-                        pyautogui.mouseUp()
+                        ni_mouse_up()
                         dragging = False
 
                     if gesture_state == "CLICKED" and d_click > release_thr:
@@ -1185,7 +1210,7 @@ def webcam_thread(frame_q=None):
                 cur_hex = EDITOR_COLORS_HEX[draw_color_idx]
                 cur_bgr = EDITOR_COLORS_BGR[draw_color_idx]
 
-                sx, sy = norm_to_screen(ix_n, iy_n, screen_w, screen_h)
+                sx, sy = norm_to_screen(ix_n, iy_n, screen_left, screen_right, screen_top, screen_bottom)
 
                 if d_clear < pinch_thr:
                     finalize_active_stroke()
@@ -1240,7 +1265,7 @@ def webcam_thread(frame_q=None):
                         if erase_gesture_active:
                             finalize_active_stroke()
                             draw_gesture_active = False
-                            esx, esy = norm_to_screen((mx_n + tx_n) / 2, (my_n + ty_n) / 2, screen_w, screen_h)
+                            esx, esy = norm_to_screen((mx_n + tx_n) / 2, (my_n + ty_n) / 2, screen_left, screen_right, screen_top, screen_bottom)
                             try_put(draw_queue, ("erase", esx, esy, ERASER_SIZE * 2))
                             try_put_ctrl(("cursor", esx, esy, "#aaaaaa", "erase"))
                             mx_px = int(mx_n * CAM_W)
@@ -1263,7 +1288,7 @@ def webcam_thread(frame_q=None):
                                 smooth_draw_sx = smooth_draw_sx * DRAW_SMOOTHING + track_x * (1 - DRAW_SMOOTHING)
                                 smooth_draw_sy = smooth_draw_sy * DRAW_SMOOTHING + track_y * (1 - DRAW_SMOOTHING)
 
-                            raw_dsx, raw_dsy = norm_to_screen(smooth_draw_sx, smooth_draw_sy, screen_w, screen_h)
+                            raw_dsx, raw_dsy = norm_to_screen(smooth_draw_sx, smooth_draw_sy, screen_left, screen_right, screen_top, screen_bottom)
                             t_draw = time.perf_counter()
                             dsx = int(draw_oef_x.filter(float(raw_dsx), t_draw))
                             dsy = int(draw_oef_y.filter(float(raw_dsy), t_draw))
@@ -1316,7 +1341,7 @@ def webcam_thread(frame_q=None):
 
         else:
             if window_switch_active:
-                pyautogui.keyUp("alt")
+                ni_key_up("alt")
                 window_switch_active = False
             lm_smooth = None
             scroll_mode_active = False
@@ -1332,7 +1357,7 @@ def webcam_thread(frame_q=None):
             erase_gesture_active = False
             finalize_active_stroke()
             if dragging:
-                pyautogui.mouseUp()
+                ni_mouse_up()
                 dragging = False
             try_put_ctrl(("cursor_hide",))
             cv2.putText(
@@ -1363,7 +1388,7 @@ def webcam_thread(frame_q=None):
         key = cv2.waitKey(1) & 0xFF
         if key == 27:
             if window_switch_active:
-                pyautogui.keyUp("alt")
+                ni_key_up("alt")
                 window_switch_active = False
             try_put_ctrl(("quit",))
             break
@@ -1376,7 +1401,7 @@ def webcam_thread(frame_q=None):
             print(f"[PROFILER] {'ON' if _PROF_ON else 'OFF'}")
     
     if window_switch_active:
-        pyautogui.keyUp("alt")
+        ni_key_up("alt")
         window_switch_active = False
 
     if cap is not None:

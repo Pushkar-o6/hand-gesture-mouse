@@ -13,11 +13,13 @@ if __package__ in (None, ""):
     from hand_gesture_mouse.settings import CAM_H, CAM_W
     from hand_gesture_mouse.overlay import ScreenOverlay
     from hand_gesture_mouse.mode3_viewer import viewer_thread
+    from hand_gesture_mouse.gui import start_tray_detached
 else:
     from .controller import webcam_thread
     from .settings import CAM_H, CAM_W
     from .overlay import ScreenOverlay
     from .mode3_viewer import viewer_thread
+    from .gui import start_tray_detached
 
 
 def _capture_thread(frame_q: queue.Queue):
@@ -52,6 +54,9 @@ def _capture_thread(frame_q: queue.Queue):
 
 
 def main():
+    # Start the system tray background icon + Settings GUI entrypoint
+    tray_icon = start_tray_detached()
+
     frame_q = queue.Queue(maxsize=2)
     cam_thread = threading.Thread(target=_capture_thread, args=(frame_q,), daemon=True)
     cam_thread.start()

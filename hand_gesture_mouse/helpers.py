@@ -206,11 +206,11 @@ def are_fingers_together(lm, proximity_threshold=0.10):
     return bool(np.all(distances < proximity_threshold))
 
 
-def norm_to_screen(nx, ny, screen_w, screen_h):
+def norm_to_screen(nx, ny, screen_left, screen_right, screen_top, screen_bottom):
     x_lo, x_hi = CAM_MARGIN_X, 1.0 - CAM_MARGIN_X
     y_lo, y_hi = CAM_MARGIN_Y, 1.0 - CAM_MARGIN_Y
-    sx = int(np.interp(nx, [x_lo, x_hi], [0, screen_w]))
-    sy = int(np.interp(ny, [y_lo, y_hi], [0, screen_h]))
-    sx = int(np.clip(sx, 0, screen_w - 1))
-    sy = int(np.clip(sy, 0, screen_h - 1))
+    sx = int(np.interp(nx, [x_lo, x_hi], [screen_left, screen_right]))
+    sy = int(np.interp(ny, [y_lo, y_hi], [screen_top, screen_bottom]))
+    sx = int(np.clip(sx, screen_left, screen_right - 1))
+    sy = int(np.clip(sy, screen_top, screen_bottom - 1))
     return sx, sy
